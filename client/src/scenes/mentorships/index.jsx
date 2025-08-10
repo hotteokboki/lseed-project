@@ -26,6 +26,7 @@ import DownloadOutlinedIcon from "@mui/icons-material/DownloadOutlined";
 import { useNavigate } from "react-router-dom"; // For navigation
 import { Snackbar, Alert } from "@mui/material";
 import { JsonRequestError } from "@fullcalendar/core/index.js";
+import axiosClient from "../../api/axiosClient";
 
 const Mentorships = () => {
   const theme = useTheme();
@@ -73,9 +74,7 @@ const Mentorships = () => {
   useEffect(() => {
     const fetchAvailability = async () => {
       try {
-        const response = await axios.get(`${process.env.REACT_APP_API_BASE_URL}/get-mentor-availability`, {
-          withCredentials: true, // If session/cookie-based auth
-        });
+        const response = await axiosClient.get(`/api/get-mentor-availability`);
         setIsAvailable(response.data.isAvailable);
       } catch (err) {
         console.error("Failed to fetch availability", err);
@@ -89,10 +88,9 @@ const Mentorships = () => {
     try {
       const newValue = !isAvailable;
       setIsLoadingToggle(true);
-      await axios.post(
-        `${process.env.REACT_APP_API_BASE_URL}/toggle-mentor-availability`,
-        { isAvailable: newValue },
-        { withCredentials: true } // ✅ ensure cookie is sent
+      await axiosClient.post(
+        `${process.env.REACT_APP_API_BASE_URL}/api/toggle-mentor-availability`,
+        { isAvailable: newValue }
       );
       setIsAvailable(newValue);
     } catch (err) {

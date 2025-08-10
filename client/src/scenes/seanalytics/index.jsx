@@ -39,6 +39,7 @@ import CashFlowChart from "../../components/CashFlowChart.jsx";
 import PeopleIcon from "@mui/icons-material/People";
 import InventoryValuePie from "../../components/TotalInventoryPieChart.jsx";
 import InventoryTurnoverBar from "../../components/InventoryTurnoverBarChart.jsx";
+import axiosClient from "../../api/axiosClient.js";
 
 const SEAnalytics = () => {
   const theme = useTheme();
@@ -88,12 +89,11 @@ const SEAnalytics = () => {
       }
 
       try {
-        const res = await fetch(
-          `${process.env.REACT_APP_API_BASE_URL}/get-accepted-application/${selectedSE.accepted_application_id}`
+        const res = await axiosClient.get(
+          `/api/get-accepted-application/${selectedSE.accepted_application_id}`
         );
-        if (!res.ok) throw new Error("Failed to fetch application details");
 
-        const data = await res.json();
+        const data = res.data;
         setSEApplication(data);
       } catch (error) {
         console.error("Error fetching application details:", error);
@@ -109,10 +109,10 @@ const SEAnalytics = () => {
     const fetchData = async () => {
       try {
         // Fetch SE list
-        const seResponse = await fetch(
-          `${process.env.REACT_APP_API_BASE_URL}/getAllSocialEnterprises`
+        const seResponse = await axiosClient.get(
+          `/api/get-all-social-enterprises`
         );
-        const seData = await seResponse.json();
+        const seData = seResponse.data;
 
         const formattedSEData = seData.map((se) => ({
           id: se?.se_id ?? "",
@@ -134,13 +134,9 @@ const SEAnalytics = () => {
         }
 
         const results = await Promise.allSettled([
-          axios.get(
-            `${process.env.REACT_APP_API_BASE_URL}/api/financial-statements`
-          ),
-          axios.get(`${process.env.REACT_APP_API_BASE_URL}/api/cashflow`),
-          axios.get(
-            `${process.env.REACT_APP_API_BASE_URL}/api/inventory-distribution`
-          ),
+          axiosClient.get(`/api/financial-statements`),
+          axiosClient.get(`/api/cashflow`),
+          axiosClient.get(`/api/inventory-distribution`),
         ]);
 
         const [financialResult, cashFlowResult, inventoryResult] = results;
@@ -178,22 +174,20 @@ const SEAnalytics = () => {
         // Fetch SE-specific analytics (with fallbacks)
         if (id) {
           const analyticsResults = await Promise.allSettled([
-            fetch(
-              `${process.env.REACT_APP_API_BASE_URL}/api/se-analytics-stats/${id}`
+            axiosClient.get(
+              `/api/se-analytics-stats/${id}`
             ),
-            fetch(
-              `${process.env.REACT_APP_API_BASE_URL}/api/critical-areas/${id}`
+            axiosClient.get(
+              `/api/critical-areas/${id}`
             ),
-            fetch(
-              `${process.env.REACT_APP_API_BASE_URL}/api/common-challenges/${id}`
+            axiosClient.get(
+              `/api/common-challenges/${id}`
             ),
-            fetch(
-              `${process.env.REACT_APP_API_BASE_URL}/api/likert-data/${id}`
+            axiosClient.get(
+              `/api/likert-data/${id}`
             ),
-            fetch(`${process.env.REACT_APP_API_BASE_URL}/api/radar-data/${id}`),
-            fetch(
-              `${process.env.REACT_APP_API_BASE_URL}/getMentorEvaluationsBySEID/${id}`
-            ),
+            axiosClient.get(`/api/radar-data/${id}`),
+            axiosClient.get(`/api/get-mentor-evaluations-by-seid/${id}`),
           ]);
 
           const [
@@ -207,7 +201,7 @@ const SEAnalytics = () => {
 
           // Evaluations
           if (evaluationsResult.status === "fulfilled") {
-            const rawEvaluations = await evaluationsResult.value.json();
+            const rawEvaluations = await evaluationsResult.value.data;
 
             const formattedEvaluationsData = rawEvaluations.map(
               (evaluation) => ({
@@ -227,7 +221,7 @@ const SEAnalytics = () => {
 
           // Stats
           if (statsResult.status === "fulfilled") {
-            const statsData = await statsResult.value.json();
+            const statsData = await statsResult.value.data;
             setStats({
               registeredUsers:
                 Number(statsData.registeredUsers?.[0]?.total_users) || 0,
@@ -246,13 +240,13 @@ const SEAnalytics = () => {
 
           // Critical Areas
           if (criticalAreasResult.status === "fulfilled") {
-            const criticalAreasData = await criticalAreasResult.value.json();
+            const criticalAreasData = await criticalAreasResult.value.data;
             setCriticalAreas(criticalAreasData);
           }
 
           // Pie Chart
           if (pieResult.status === "fulfilled") {
-            const rawPieData = await pieResult.value.json();
+            const rawPieData = await pieResult.value.data;
             const formattedPieData = Array.from(
               new Map(
                 rawPieData.map((item, index) => [
@@ -277,13 +271,13 @@ const SEAnalytics = () => {
 
           // Likert
           if (likertResult.status === "fulfilled") {
-            const rawLikertData = await likertResult.value.json();
+            const rawLikertData = await likertResult.value.data;
             setLikertData(rawLikertData);
           }
 
           // Radar
           if (radarResult.status === "fulfilled") {
-            const radarChartData = await radarResult.value.json();
+            const radarChartData = await radarResult.value.data;
             if (Array.isArray(radarChartData)) {
               setRadarData(radarChartData);
             } else {
@@ -372,8 +366,8 @@ const SEAnalytics = () => {
         const pieBase64 = await svgToBase64(pieData, pieBBox);
         const likertBase64 = await svgToBase64(likertData, likertBBox);
 
-        const response = await axios.post(
-          `${process.env.REACT_APP_API_BASE_URL}/api/adhoc-report`,
+        const response = await axiosClient.post(
+          `/api/adhoc-report`,
           {
             chartImageRadar: radarBase64,
             chartImagePie: pieBase64,
@@ -727,8 +721,8 @@ const SEAnalytics = () => {
 
   const handleViewExistingEvaluation = async (evaluation_id) => {
     try {
-      const response = await axios.get(
-        `${process.env.REACT_APP_API_BASE_URL}/getEvaluationDetails`,
+      const response = await axiosClient.get(
+        `/api/get-evaluation-details`,
         {
           params: { evaluation_id },
         }
@@ -841,8 +835,8 @@ const SEAnalytics = () => {
           equitySVGBBox
         );
 
-        const response = await axios.post(
-          `${process.env.REACT_APP_API_BASE_URL}/api/financial-report`,
+        const response = await axiosClient.post(
+          `/api/financial-report`,
           {
             chartImage: chartImageBase64,
             cashFlowImage: cashFlowImageBase64,

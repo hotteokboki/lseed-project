@@ -596,7 +596,7 @@ const Mentors = ({ }) => {
   const matchMentors = async (selectedSeId) => {
     try {
       const response = await axiosClient.post(`/api/suggested-mentors`, {
-        body: JSON.stringify({ se_id: selectedSeId }),
+       se_id: selectedSeId,
       });
 
       const data = response.data;

@@ -41,6 +41,7 @@ import utc from "dayjs/plugin/utc";
 import timezone from "dayjs/plugin/timezone";
 import { saveAs } from "file-saver";
 import { preventDefault } from "@fullcalendar/core/internal";
+import axiosClient from "../../api/axiosClient";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -372,20 +373,16 @@ const Scheduling = ({}) => {
         if (isLSEEDUser) {
           let lseedResponse;
           if (roles.includes("LSEED-Coordinator")) {
-            const programRes = await axios.get(
-              `${process.env.REACT_APP_API_BASE_URL}/api/get-program-coordinator`,
-              {
-                withCredentials: true,
-              }
-            );
+            const programRes = await axiosClient.get(
+              `/api/get-program-coordinator`);
             const program = programRes.data[0]?.name;
-            lseedResponse = await axios.get(
-              `${process.env.REACT_APP_API_BASE_URL}/api/mentorSchedules`,
+            lseedResponse = await axiosClient.get(
+              `/api/get-mentor-schedules`,
               { params: { program } }
             );
           } else {
-            lseedResponse = await axios.get(
-              `${process.env.REACT_APP_API_BASE_URL}/api/mentorSchedules`
+            lseedResponse = await axiosClient.get(
+              `/api/get-mentor-schedules`
             );
           }
           setLseedHistory(lseedResponse.data || []);
@@ -717,23 +714,16 @@ const Scheduling = ({}) => {
         let response;
 
         if (user?.roles.includes("LSEED-Coordinator")) {
-          const res = await axios.get(
-            `${process.env.REACT_APP_API_BASE_URL}/api/get-program-coordinator`,
-            {
-              withCredentials: true, // Equivalent to credentials: "include"
-            }
-          );
+          const res = await axiosClient.get(`/api/get-program-coordinator`);
 
           const program = res.data[0]?.name;
 
-          response = await axios.get(
-            `${process.env.REACT_APP_API_BASE_URL}/api/pending-schedules`,
-            { params: { program }, withCredentials: true }
+          response = await axiosClient.get(
+            `/api/pending-schedules`,
+            { params: { program } }
           );
         } else {
-          response = await axios.get(
-            `${process.env.REACT_APP_API_BASE_URL}/api/pending-schedules`
-          );
+          response = await axiosClient.get(`/api/pending-schedules`);
         }
         const data = response.data; // no need for .json() when using axios
 

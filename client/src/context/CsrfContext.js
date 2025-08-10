@@ -20,9 +20,7 @@ export const CsrfProvider = ({ children }) => {
   useEffect(() => {
     const fetchCsrfToken = async () => {
       try {
-        const res = await axiosClient.get(`${process.env.REACT_APP_API_BASE_URL}/api/get-csrf-token`, {
-          withCredentials: true
-        });
+        const res = await axiosClient.get(`/api/get-csrf-token`);
         setCsrfToken(res.data.csrfToken);
         setGlobalCsrfToken(res.data.csrfToken); // ✅ store it in the global too
       } catch (err) {

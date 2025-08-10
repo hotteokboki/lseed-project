@@ -589,7 +589,7 @@ const Analytics = ({}) => {
         const radarBase64 = await svgToBase64(radarData, radarBBox);
 
         const response = await axiosClient.post(
-          `${process.env.REACT_APP_API_BASE_URL}/api/overall-evaluation-report`,
+          `/api/overall-evaluation-report`,
           {
             chartImageRadar: radarBase64,
             overallCategoryStats: overallCategoryStats,

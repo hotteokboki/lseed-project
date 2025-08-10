@@ -34,6 +34,7 @@ const pgSession = require("connect-pg-simple")(session);
 const cookieParser = require("cookie-parser");
 const { addProgram } = require("./controllers/programsController");
 const profileRoutes = require("./routes/profileRoutes.js");
+const PDFDocument = require("pdfkit");
 const csrf = require('csurf');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -129,11 +130,14 @@ app.use(helmet({
 
 app.use(cors({
   origin: allowedOrigin,
-  credentials: true
+  credentials: true,
+  methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type", "X-CSRF-Token", "X-Requested-With", "Authorization"]
 }));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Set size limits BEFORE any routes
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 app.set('trust proxy', 1);
 
@@ -178,7 +182,13 @@ const apiLimiter = rateLimit({
 // Prevents DoS and Brute force
 app.use("/api/", apiLimiter);
 
-const csrfProtection = csrf({ cookie: true });
+const csrfProtection = csrf({
+  cookie: {
+    httpOnly: true,
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    secure: process.env.NODE_ENV === 'production'
+  }
+});
 
 const isAuthenticated = (req, res, next) => {
   if (req.session && req.session.isAuth && req.session.user) {
@@ -200,16 +210,20 @@ const mailer = nodemailer.createTransport({
   auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
 });
 
-// First check auth and AJAX for /api
-app.use('/api', isAuthenticated, isAjaxRequest);
-
-app.use('/api', (req, res, next) => {
-  const unsafeMethods = ['POST', 'PUT', 'PATCH', 'DELETE'];
-  if (unsafeMethods.includes(req.method)) {
-    return csrfProtection(req, res, next);
-  }
-  next();
+// PUBLIC token route (no isAuthenticated)
+app.get('/api/get-csrf-token', isAjaxRequest, csrfProtection, (req, res) => {
+  const token = req.csrfToken();
+  res.cookie('XSRF-TOKEN', token, {
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true
+  });
+  res.json({ csrfToken: token });
 });
+
+// Then protect the rest
+app.use('/api', isAuthenticated, isAjaxRequest, csrfProtection);
+
 
 // API Routes
 //TODO
@@ -662,6 +676,7 @@ app.get('/api/get-csrf-token', csrfProtection, (req, res) => {
   res.json({ csrfToken: token });
 });
 // SUBA PARTS BELOW
+// DO NOT MODIFY ANYTHING IN THIS API
 app.post("/login", loginLimiter, async (req, res) => {
   const { email, password } = req.body;
 
@@ -758,7 +773,7 @@ app.post("/login", loginLimiter, async (req, res) => {
     res.status(500).json({ message: "Internal server error" });
   }
 });
-
+// DO NOT MODIFY ANYTHING IN THIS API
 app.post("/logout", (req, res) => {
   console.log("Successfully Logged Out");
 
@@ -928,7 +943,7 @@ app.post("/apply-as-mentor", async (req, res) => {
     res.status(500).json({ message: "An error occurred during mentor application." });
   }
 });
-
+// DO NOT MODIFY ANYTHING IN THIS API
 app.post("/signup", async (req, res) => {
   const {
     firstName,
@@ -1698,7 +1713,7 @@ app.get("/api/ack-data", async (req, res) => {
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
-
+// TODO Maybe change query
 app.get("/api/evaluation-stats", async (req, res) => {
   try {
     const program = req.query.program || null; // Optional program param
@@ -1969,7 +1984,7 @@ app.get("/api/get-mentor-schedules", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch mentor schedules" });
   }
 });
-
+// TODO : Check query
 app.get("/api/admin/users", async (req, res) => {
   try {
     const users = await getUsers(); // Fetch users from DB
@@ -2337,7 +2352,7 @@ app.get("/api/get-accepted-application/:id", async (req, res) => {
   }
 });
 
-app.get("/api/getAllSocialEnterprises", async (req, res) => {
+app.get("/api/get-all-social-enterprises", async (req, res) => {
   try {
     const result = await getAllSocialEnterprises(); // Fetch SEs from DB
     if (!result || result.length === 0) {
@@ -2466,7 +2481,7 @@ app.get("/api/get-upcoming-schedules-for-mentor", async (req, res) => {
   }
 });
 
-app.get("/api/getMentorEvaluationsBySEID/:se_id", async (req, res) => {
+app.get("/api/get-mentor-evaluations-by-seid/:se_id", async (req, res) => {
   try {
     const { se_id } = req.params; // Extract se_id from route parameters
 

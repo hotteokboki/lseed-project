@@ -26,7 +26,7 @@ const HeatmapWrapper = ({ }) => {
         if (isLSEEDCoordinator) {
           const res = await axiosClient.get(`/api/get-program-coordinator`);
 
-          const data = await res.data;
+          const data = res.data;
           const program = data[0]?.name;
 
           response = await axiosClient.get(
@@ -34,10 +34,10 @@ const HeatmapWrapper = ({ }) => {
           );
         } else {
           response = await axiosClient.get(
-            `/heatmap-stats?period=${period}`
+            `/api/heatmap-stats?period=${period}`
           );
         }
-        const data = await response.data;
+        const data = response.data;
 
         if (!Array.isArray(data) || !data.length) {
           console.warn("Unexpected response:", data);

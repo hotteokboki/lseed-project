@@ -20,8 +20,8 @@ const AuditLogsPage = () => {
         setLoading(true);
         const response = await axiosClient.get(`/api/get-audit-logs`);
         
-        const data = await response.data;
-        setLogs(data.logs); // ✅ THIS FIX
+        const data = response.data;
+        setLogs(data.logs); 
 
         console.log(data.logs)
         } catch (err) {
