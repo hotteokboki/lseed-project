@@ -131,7 +131,7 @@ app.use(helmet({
 app.use(cors({
   origin: allowedOrigin,
   credentials: true,
-  methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "X-CSRF-Token", "X-Requested-With", "Authorization"]
 }));
 
@@ -1196,171 +1196,214 @@ app.post("/signup-lseed-role", async (req, res) => {
 
 app.post("/api/accept-mentor-application", async (req, res) => {
   const { applicationId } = req.body;
+  if (!applicationId) return res.status(400).json({ message: "applicationId is required" });
 
   const client = await pgDatabase.connect();
-  let emailToSend = null; // { firstName, email }
-
   try {
-    await client.query("BEGIN");
+    await client.query('BEGIN');
 
-    // Atomic claim: only accept if still Pending
-    const claim = await client.query(
-      `UPDATE mentor_form_application
-       SET status = 'Approved'
-       WHERE id = $1 AND status = 'Pending'
-       RETURNING *;`,
+    // 1) Lock the application row
+    const appRes = await client.query(
+      `SELECT *
+         FROM mentor_form_application
+        WHERE id = $1
+        FOR UPDATE`,
       [applicationId]
     );
 
-    if (claim.rowCount === 0) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({ message: "Application already processed." });
+    if (appRes.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: "Application not found." });
     }
 
-    const app = claim.rows[0];
+    const appRow = appRes.rows[0];
 
-    // Check if user exists by email
-    const existRes = await client.query(
+    // Quick status handling (idempotent + informative)
+    if (appRow.status === 'Approved') {
+      await client.query('ROLLBACK');
+      return res.status(200).json({ message: "Already approved." });
+    }
+    if (appRow.status === 'Declined' || appRow.status === 'Processing') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: "Application already processed." });
+    }
+    // Only Pending should reach here
+
+    // 2) Find user by email
+    const userRes = await client.query(
       `SELECT * FROM users WHERE email = $1`,
-      [app.email]
+      [appRow.email]
     );
 
-    if (existRes.rowCount > 0) {
-      const u = existRes.rows[0];
+    let user;
+    if (userRes.rowCount > 0) {
+      // Existing user path: must be LSEED-Coordinator
+      user = userRes.rows[0];
 
-      // Must be Coordinator per your rule
-      const r = await client.query(
-        `SELECT 1 FROM user_has_roles WHERE user_id=$1 AND role_name='LSEED-Coordinator'`,
-        [u.user_id]
+      const rolesRes = await client.query(
+        `SELECT role_name FROM user_has_roles WHERE user_id = $1`,
+        [user.user_id]
       );
-      if (r.rowCount === 0) {
-        await client.query("ROLLBACK");
+      const roles = rolesRes.rows.map(r => r.role_name);
+      const isCoordinator = roles.includes('LSEED-Coordinator');
+
+      if (!isCoordinator) {
+        await client.query('ROLLBACK');
         return res.status(409).json({
           message: "A user with this email already exists and is not a Coordinator.",
         });
       }
 
-      // Grant Mentor idempotently
+      // Grant Mentor role (idempotent)
       await client.query(
         `INSERT INTO user_has_roles (user_id, role_name)
-         VALUES ($1,'Mentor')
+         VALUES ($1, 'Mentor')
          ON CONFLICT (user_id, role_name) DO NOTHING`,
-        [u.user_id]
+        [user.user_id]
       );
 
-      // Create mentor profile
+      // Mentor profile (one per application)
       await client.query(
         `INSERT INTO mentors (
            mentor_id, mentor_firstname, mentor_lastname, email, contactnum,
            critical_areas, preferred_mentoring_time, accepted_application_id
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+         )
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (accepted_application_id) DO NOTHING`,
         [
-          u.user_id,
-          u.first_name,
-          u.last_name,
-          u.email,
-          u.contactnum,
-          app.business_areas,
-          app.preferred_time,
-          applicationId,
+          user.user_id,
+          user.first_name,
+          user.last_name,
+          user.email,
+          user.contactnum,
+          appRow.business_areas,
+          appRow.preferred_time,
+          applicationId
         ]
       );
 
-      // In-app notification INSIDE the txn
+      // Notification
       await client.query(
         `INSERT INTO notification (notification_id, receiver_id, title, message, created_at, target_route)
-         VALUES (uuid_generate_v4(), $1, $2, $3, NOW(), '/dashboard/mentor');`,
+         VALUES (uuid_generate_v4(), $1, $2, $3, NOW(), '/dashboard/mentor')`,
         [
-          u.user_id,
+          user.user_id,
           "Mentor Access Granted",
-          "Your application to also serve as a mentor has been approved. You can now access mentor features.",
+          "Your application to also serve as a mentor has been approved. You can now use your account to access mentor features, connect with social enterprises, and support them through mentorship."
         ]
       );
-
-      emailToSend = { firstName: u.first_name, email: u.email };
-    } else {
-      // Create user as Mentor
-      const ins = await client.query(
-        `INSERT INTO users (first_name, last_name, email, password, contactnum, roles, isactive)
-         VALUES ($1,$2,$3,$4,$5,'Mentor', true)
-         RETURNING user_id, first_name, email`,
-        [app.first_name, app.last_name, app.email, app.password, app.contact_no]
-      );
-      const u = ins.rows[0];
-
-      await client.query(
-        `INSERT INTO user_has_roles (user_id, role_name)
-         VALUES ($1,'Mentor')
-         ON CONFLICT (user_id, role_name) DO NOTHING`,
-        [u.user_id]
-      );
-
-      await client.query(
-        `INSERT INTO mentors (
-           mentor_id, mentor_firstname, mentor_lastname, email, contactnum,
-           critical_areas, preferred_mentoring_time, accepted_application_id
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [
-          u.user_id,
-          app.first_name,
-          app.last_name,
-          app.email,
-          app.contact_no,
-          app.business_areas,
-          app.preferred_time,
-          applicationId,
-        ]
-      );
-
-      await client.query(
-        `INSERT INTO notification (notification_id, receiver_id, title, message, created_at, target_route)
-         VALUES (uuid_generate_v4(), $1, $2, $3, NOW(), '/dashboard/mentor');`,
-        [
-          u.user_id,
-          "Welcome to LSEED Insight",
-          "Your mentor application was accepted. Explore your mentor dashboard to get started.",
-        ]
-      );
-
-      emailToSend = { firstName: u.first_name, email: u.email };
-    }
-
-    await client.query("COMMIT");
-
-    // Send email AFTER COMMIT (kept in the same API handler as you prefer)
-    if (emailToSend) {
-      const loginUrl = process.env.WEBHOOK_BASE_URL;
+      // Email
+      // ✉️ Send email
       await mailer.sendMail({
         from: `"LSEED Center" <${process.env.EMAIL_USER}>`,
-        to: emailToSend.email,
+        to: user.email,
         subject: "Your LSEED Mentor Application Has Been Accepted",
         html: `
           <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #000;">
-            <p style="margin: 0 0 16px;">Dear ${emailToSend.firstName},</p>
+            <p style="margin: 0 0 16px;">Dear ${user.first_name},</p>
+
             <p style="margin: 0 0 16px;">
-              Congratulations! Your application to become a mentor at the <strong>LSEED Center</strong> has been accepted.
+              Your request to also serve as a mentor within the <strong>LSEED Center</strong> has been approved.
             </p>
+
             <p style="margin: 0 0 16px;">
-              You may now log in using your credentials.
-              <br/>
-              <a href="${loginUrl}" style="color: #1E4D2B; text-decoration: underline;">Click here to Login</a>
+              Your account has now been granted mentor access. You may continue using your existing login credentials to access mentor features.
+              <a href="${process.env.WEBHOOK_BASE_URL}" style="color: #1E4D2B; text-decoration: underline;">Click here to Login</a>
             </p>
-            <p style="margin: 0;">Warm regards,<br/>The LSEED Team</p>
+
+            <p style="margin: 0;">
+              Warm regards,<br/>
+              <strong>The LSEED Team</strong>
+            </p>
           </div>
-        `,
+        `
       });
+    } else {
+      // 3) New user path
+      // ⚠️ Make sure appRow.password is already a HASH. If not, hash before inserting.
+      const insertUser = await client.query(
+        `INSERT INTO users (first_name, last_name, email, password, contactnum, roles, isactive)
+         VALUES ($1,$2,$3,$4,$5,'Mentor', true)
+         RETURNING user_id, first_name, last_name, email, contactnum`,
+        [appRow.first_name, appRow.last_name, appRow.email, appRow.password, appRow.contact_no]
+      );
+      user = insertUser.rows[0];
+
+      await client.query(
+        `INSERT INTO user_has_roles (user_id, role_name)
+         VALUES ($1,'Mentor')
+         ON CONFLICT (user_id, role_name) DO NOTHING`,
+        [user.user_id]
+      );
+
+      await client.query(
+        `INSERT INTO mentors (
+           mentor_id, mentor_firstname, mentor_lastname, email, contactnum,
+           critical_areas, preferred_mentoring_time, accepted_application_id
+         )
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (accepted_application_id) DO NOTHING`,
+        [
+          user.user_id,
+          appRow.first_name,
+          appRow.last_name,
+          appRow.email,
+          user.contactnum ?? appRow.contact_no,
+          appRow.business_areas,
+          appRow.preferred_time,
+          applicationId
+        ]
+      );
+
+      await client.query(
+        `INSERT INTO notification (notification_id, receiver_id, title, message, created_at, target_route)
+         VALUES (uuid_generate_v4(), $1, $2, $3, NOW(), '/dashboard/mentor')`,
+        [
+          user.user_id,
+          "Welcome to LSEED Insight",
+          "As a mentor at the LSEED Center, you can support social enterprises by sharing your expertise and guidance. Explore your dashboard to get started."
+        ]
+      );
     }
+
+    // 4) Flip status to Approved (while the row is still locked)
+    await client.query(
+      `UPDATE mentor_form_application
+          SET status = 'Approved'
+        WHERE id = $1`,
+      [applicationId]
+    );
+
+    await client.query('COMMIT');
+
+    // 5) Email AFTER COMMIT
+    await mailer.sendMail({
+      from: `"LSEED Center" <${process.env.EMAIL_USER}>`,
+      to: user.email,
+      subject: "Your LSEED Mentor Application Has Been Accepted",
+      html: `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #000;">
+          <p style="margin: 0 0 16px;">Dear ${user.first_name},</p>
+          <p style="margin: 0 0 16px;">
+            ${userRes?.rowCount > 0
+          ? `Your request to also serve as a mentor within the <strong>LSEED Center</strong> has been approved.`
+          : `Congratulations! Your application to become a mentor at the <strong>LSEED Center</strong> has been accepted.`
+        }
+          </p>
+          <p style="margin: 0 0 16px;">
+            You may now log in using your credentials.
+            <br/>
+            <a href="${process.env.WEBHOOK_BASE_URL}" style="text-decoration: underline;">Click here to Login</a>
+          </p>
+          <p style="margin: 0;">Warm regards,<br/><strong>The LSEED Team</strong></p>
+        </div>
+      `
+    });
 
     return res.status(201).json({ message: "Mentor successfully added" });
   } catch (err) {
-    try { await client.query("ROLLBACK"); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     console.error("❌ Error processing mentor application:", err);
-
-    // Unique violation (e.g., mentors.accepted_application_id) -> someone else already processed
-    if (err && err.code === "23505") {
-      return res.status(409).json({ message: "Application already processed." });
-    }
-
     return res.status(500).json({ message: "Failed to create mentor account." });
   } finally {
     client.release();
@@ -1424,7 +1467,7 @@ app.post("/api/decline-mentor-application", async (req, res) => {
 
     return res.status(200).json({ message: "Application declined and email sent." });
   } catch (err) {
-    try { await client.query("ROLLBACK"); } catch {}
+    try { await client.query("ROLLBACK"); } catch { }
     console.error("❌ Error declining application:", err);
     return res.status(500).json({ message: "Failed to decline application." });
   } finally {
@@ -2617,14 +2660,21 @@ app.post("/api/session/role", (req, res) => {
 
 app.get("/api/top-se-performance", async (req, res) => {
   try {
-    const period = req.query.period;
-    const program = req.query.program || null;
-    const se_id = req.query.se_id || null;
+    // 1) Normalize query params (fixes ?se_id=null / "" / undefined)
+    const normalize = (v) => {
+      if (v == null) return null; // undefined or null
+      const s = String(v).trim();
+      return (s === "" || s.toLowerCase() === "null" || s.toLowerCase() === "undefined") ? null : s;
+    };
 
-    const user_id = req.session.user?.id;
+    const period = normalize(req.query.period) || "overall";
+    const program = normalize(req.query.program);
+    let se_id = normalize(req.query.se_id);
+
+    const user_id = req.session.user?.id || null;
     let mentor_id = null;
 
-    // Check if the user is acting as a mentor
+    // 2) Mentor role check
     if (
       req.session.user?.activeRole === "Mentor" ||
       (req.session.user?.roles?.includes("Mentor") && !req.session.user?.activeRole)
@@ -2632,34 +2682,33 @@ app.get("/api/top-se-performance", async (req, res) => {
       mentor_id = user_id;
     }
 
+    // 3) Only do SE-specific access checks if we actually have a usable se_id
     if (se_id && mentor_id) {
       // Step 1: Check if user is the direct mentor
       const seMentorCheckQuery = `
         SELECT mentor_id FROM mentorships
-        WHERE se_id = $1
+        WHERE se_id = $1::uuid
         LIMIT 1;
       `;
       const mentorResult = await pgDatabase.query(seMentorCheckQuery, [se_id]);
-
       const actualMentorId = mentorResult.rows[0]?.mentor_id;
 
       if (!actualMentorId) {
         return res.status(404).json({ message: "SE not found or not part of any mentorship." });
       }
 
-      // Step 2: If user is the mentor, proceed
       if (actualMentorId === user_id) {
-        mentor_id = user_id; // Confirm assignment for clarity
+        mentor_id = user_id; // direct mentor
       } else {
-        // Step 3: Check if user is a collaborator on a mentorship tied to this SE
+        // Step 3: Check collaborator access
         const collabCheckQuery = `
           SELECT 1
           FROM mentorship_collaborations mc
           JOIN mentorships ms_suggested ON mc.suggested_collaborator_mentorship_id = ms_suggested.mentorship_id
-          JOIN mentorships ms_seeking ON mc.seeking_collaboration_mentorship_id = ms_seeking.mentorship_id
+          JOIN mentorships ms_seeking   ON mc.seeking_collaboration_mentorship_id  = ms_seeking.mentorship_id
           WHERE mc.status = true
             AND $1 = ANY (ARRAY[ms_suggested.mentor_id, ms_seeking.mentor_id])
-            AND $2 = ANY (ARRAY[ms_suggested.se_id, ms_seeking.se_id])
+            AND $2::uuid = ANY (ARRAY[ms_suggested.se_id, ms_seeking.se_id])
           LIMIT 1;
         `;
         const collabCheck = await pgDatabase.query(collabCheckQuery, [user_id, se_id]);
@@ -2668,15 +2717,19 @@ app.get("/api/top-se-performance", async (req, res) => {
           return res.status(403).json({ message: "Access denied: You are not authorized to view this SE." });
         }
 
-        // ✅ User is a collaborator, use the SE's assigned mentor_id
-        mentor_id = actualMentorId;
+        mentor_id = actualMentorId; // collaborator: use assigned mentor_id
       }
     }
-    // Proceed to fetch SE performance
+
+    // 4) Proceed to fetch SE performance (your function already guards "null" strings,
+    //    but it's safe now anyway since we normalized)
     const result = await getTopSEPerformance(period, program, mentor_id, se_id);
 
-    if (result.length === 0) {
-      return res.status(404).json({ message: "No performance data available" });
+    if (!result || result.length === 0) {
+      return res.status(200).json({
+        data: [],
+        message: "No performance data available",
+      });
     }
 
     res.json(result);
