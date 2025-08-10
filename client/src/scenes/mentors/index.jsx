@@ -66,26 +66,14 @@ const Mentors = ({ }) => {
   const [anchorEl, setAnchorEl] = useState(null);
   const [menuRowId, setMenuRowId] = useState(null);
   const [mentorApplications, setMentorApplications] = useState([]);
-  const [mentorApplicationData, setMentorApplicationData] = useState({
-    name: "",
-    selectedSDG: "",
-    contact: "",
-    numberOfMembers: "",
-    selectedProgram: "",
-    selectedStatus: "",
-    abbr: "",
-    criticalAreas: [],
-  });
   const [suggestedMentors, setSuggestedMentors] = useState([]);
   const [otherMentors, setOtherMentors] = useState([]);
-  const [openAddMentor, setOpenAddMentor] = useState(false);
   const [selectedApplication, setSelectedApplication] = useState(null);
   const [openApplicationDialog, setOpenApplicationDialog] = useState(false);
   const [loading, setLoading] = useState(true); // Loading state for API call
   const [mentors, setMentors] = useState([]);
   const [socialEnterprises, setSocialEnterprises] = useState([]);
   const [stats, setStats] = useState(null);
-  const [selectedRowId, setSelectedRowId] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isAllowedtoApply, setIsAllowedtoApply] = useState(null);
   const [selectedMentor, setSelectedMentor] = useState(null);
@@ -99,8 +87,6 @@ const Mentors = ({ }) => {
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMessage, setSnackbarMessage] = useState("");
   const [snackbarSeverity, setSnackbarSeverity] = useState("success");
-  const hasMentorRole = user?.roles?.includes("Mentor");
-  const isLSEEDCoordinator = user?.roles?.includes("LSEED-Coordinator");
 
   const businessAreasList = [
     "Application Development",
@@ -141,6 +127,7 @@ const Mentors = ({ }) => {
   const fetchMentors = async () => {
     try {
       const response = await axiosClient.get(`/api/mentors`); // ✅ Fixed URL
+      console.log("📥 MENTORS Response:", response.data); // ✅ Debugging Log
 
       const formattedData = response.data.map((mentor) => ({
         id: mentor.mentor_id,
@@ -150,7 +137,7 @@ const Mentors = ({ }) => {
         email: mentor.email,
         contactnum: mentor.contactNum || "N/A",
         numberOfSEsAssigned: mentor.number_SE_assigned || 0,
-        assigned_se_names: mentor.assigned_se_names || "",
+        assigned_se_names: mentor.assigned_se_names || "", // ✅ Include this line
         status: "Active",
       }));
 
@@ -352,7 +339,7 @@ const Mentors = ({ }) => {
     console.log("DATA: ", formData)
 
     try {
-      // You can POST this to your API (DO NOT MODIFY)
+      // You can POST this to your API
       await fetch(`${process.env.REACT_APP_API_BASE_URL}/apply-as-mentor`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -396,75 +383,101 @@ const Mentors = ({ }) => {
     }));
   };
 
+  const handleAcceptMentor = async (row) => {
+    const res = await axiosClient.post(`/api/accept-mentor-application`, {
+      applicationId: row.id
+    });
+
+    const data = res.data;
+    console.log("✅ Mentor accepted:", data);
+  };
+
   const handleMenuAction = async (action, row) => {
-    const reloadIfChanged = async (apiCall) => {
+    console.log(`Action: ${action}`, row);
+
+    if (action === "Accept") {
       try {
-        const res = await apiCall();
-        if (res.status === 200 || res.status === 201) {
-          // ✅ Change was committed in DB
-          await new Promise((r) => setTimeout(r, 500)); // short delay for UI smoothness
-          window.location.reload();
-        }
+        await handleAcceptMentor(row);
+
+        setSnackbarMessage("Accepted Application! Mentor Added Successfully");
+        setSnackbarSeverity("success");
+        setSnackbarOpen(true);
+
+        await new Promise((r) => setTimeout(r, 3500));
+        window.location.reload();
       } catch (error) {
-        console.error("❌ API error:", error);
-        setSnackbarMessage(
-          error?.response?.data?.message || "Something went wrong."
-        );
+        console.error("❌ Error accepting mentor:", error);
+        setSnackbarMessage("Error processing acceptance. Please try again.");
         setSnackbarSeverity("error");
         setSnackbarOpen(true);
       }
-    };
-
-    if (action === "Accept") {
-      setSnackbarMessage("Processing acceptance...");
-      setSnackbarSeverity("info");
-      setSnackbarOpen(true);
-
-      await reloadIfChanged(() =>
-        axiosClient.post("/api/accept-mentor-application", { applicationId: row.id })
-      );
-
-      setSnackbarMessage("Accepted Application! Mentor Added Successfully");
-      setSnackbarSeverity("success");
-      setSnackbarOpen(true);
     }
 
     if (action === "Decline") {
-      setSnackbarMessage("Processing decline...");
-      setSnackbarSeverity("info");
-      setSnackbarOpen(true);
+      const applicationId = row.id;
 
-      await reloadIfChanged(() =>
-        axiosClient.post("/api/decline-mentor-application", { applicationId: row.id })
-      );
+      try {
+        await axiosClient.post("/api/decline-mentor-application", { applicationId });
 
-      setSnackbarMessage("Declined Application!");
-      setSnackbarSeverity("success");
-      setSnackbarOpen(true);
+        setSnackbarMessage("Declined Application!");
+        setSnackbarSeverity("success");
+        setSnackbarOpen(true);
+
+        // Ideally just refetch the table instead of full reload:
+        // await refetchApplications?.();
+        await new Promise((r) => setTimeout(r, 800));
+        window.location.reload();
+      } catch (error) {
+        console.error("❌ Error declining mentor:", error);
+
+        if (error?.response?.status === 409) {
+          setSnackbarMessage("Already processed by someone else.");
+        } else if (error?.response?.status === 404) {
+          setSnackbarMessage("Application not found.");
+        } else {
+          setSnackbarMessage("Error processing decline. Please try again.");
+        }
+
+        setSnackbarSeverity("error");
+        setSnackbarOpen(true);
+      } finally {
+        handleCloseMenu();
+      }
     }
 
     if (action === "View") {
-      setSelectedApplication(row);
-      setOpenApplicationDialog(true);
+      // Open the application view dialog
+      setSelectedApplication(row); // set the clicked application details
+      setOpenApplicationDialog(true); // show the dialog
     }
 
     handleCloseMenu();
   };
 
   useEffect(() => {
+    let ignore = false;
+
     const fetchMentorApplicationStatus = async () => {
-      const res = await axiosClient.get(`/api/check-mentor-application-status`);
-      const data = res.data;
-      setIsAllowedtoApply(data.allowed);
+      try {
+        const res = await axiosClient.get("/api/check-mentor-application-status");
+        if (!ignore) setIsAllowedtoApply(Boolean(res.data?.allowed));
+      } catch (err) {
+        console.error("Failed to check application status:", err);
+        if (!ignore) setIsAllowedtoApply(false); // safe default
+      }
     };
+
     fetchMentorApplicationStatus();
+    return () => { ignore = true; };
   }, []);
 
   useEffect(() => {
     const fetchMentorApplications = async () => {
       try {
-        const response = await axiosClient.get(`/api/list-mentor-applications`);
-        const data = response.data
+        const response = await axiosClient.get(`/api/list-mentor-applications`); // adjust endpoint as needed
+        const data = response.data;
+
+        console.log("Raw date_applied:", data[0]?.date_applied);
 
         // Format date_applied in all items
         const formatted = data.map((item) => ({
@@ -492,15 +505,19 @@ const Mentors = ({ }) => {
     }
   }, [selectedMentor]);
 
+  // Function to fetch assigned social enterprises
   const fetchSocialEnterprises = async (mentorId) => {
     try {
-      const { data } = await axiosClient.get(`/api/mentors/${mentorId}/social-enterprises`);
-      // normalize to { id, name }
-      setSocialEnterprises(
-        data.map(se => ({ id: se.se_id, name: se.team_name }))
+      const response = await axiosClient.get(
+        `/api/mentors/${mentorId}/social-enterprises`
       );
-    } catch (e) {
-      console.error("Error fetching social enterprises:", e);
+
+      const data = response.data; // ✅ Ensure response is parsed as JSON
+      setSocialEnterprises(data);
+      console.log("📥 Social Enterprises Data:", data);
+      return data;
+    } catch (error) {
+      console.error("Error fetching social enterprises:", error);
     }
   };
 
@@ -592,10 +609,14 @@ const Mentors = ({ }) => {
   const matchMentors = async (selectedSeId) => {
     try {
       const response = await axiosClient.post(`/api/suggested-mentors`, {
-        se_id: selectedSeId,
+        se_id: selectedSeId
       });
 
       const data = response.data;
+
+      console.log("✅ Raw mentor match response:", data);
+      console.log("👉 Suggested mentors:", data.suggested);
+      console.log("👉 Other mentors:", data.others);
 
       setSuggestedMentors(data.suggested || []);
       setOtherMentors(data.others || []);
@@ -608,39 +629,33 @@ const Mentors = ({ }) => {
 
   const handleRemoveMentorship = async () => {
     if (!selectedMentor || !selectedSE) {
-      setSnackbarMessage("Please select a mentor and a social enterprise.");
-      setSnackbarSeverity("warning");
-      setSnackbarOpen(true);
+      alert("Please select a mentor and a social enterprise.");
       return;
     }
-
+    console.log("mentorId: ", selectedMentor.mentor_id, " seId: ", selectedSE);
     try {
-      const res = await axiosClient.post('/api/remove-mentorship', {
-        mentorId: selectedMentor.mentor_id,
-        seId: selectedSE,
-      });
+      const response = await axiosClient.post(
+        `/api/remove-mentorship`,
+        {
+          mentorId: selectedMentor.mentor_id,
+          seId: selectedSE,
+        }
+      );
 
-      // Success
-      setSnackbarMessage(res.data?.message || "Successfully removed!");
+      // Show success message
+      setSnackbarMessage("Successfully Removed!");
       setSnackbarSeverity("success");
-      setSnackbarOpen(true);
+      setSnackbarOpen(true); // Ensure setSnackbarOpen is defined
 
-      // Close/reset UI
+      await new Promise((r) => setTimeout(r, 1500));
+      window.location.reload();
+
       setIsModalOpen(false);
       setSelectedMentor(null);
       setSelectedSE("");
-
-      // Refresh UI (prefer refetch over full reload)
-      if (typeof fetchMentors === "function") {
-        await fetchMentors();
-      } else {
-        setTimeout(() => window.location.reload(), 800);
-      }
+      fetchMentors(); // Refresh mentor list
     } catch (error) {
       console.error("Error removing mentorship:", error);
-      setSnackbarMessage(error?.response?.data?.message || "Failed to remove mentorship.");
-      setSnackbarSeverity("error");
-      setSnackbarOpen(true);
     }
   };
 
@@ -649,39 +664,37 @@ const Mentors = ({ }) => {
     const { selectedMentor, selectedSocialEnterprise } = mentorshipData;
 
     if (!selectedMentor || !selectedSocialEnterprise) {
-      setSnackbarMessage("Please select both a mentor and a social enterprise.");
-      setSnackbarSeverity("warning");
-      setSnackbarOpen(true);
+      alert("Please select both a mentor and a social enterprise.");
       return;
     }
 
     try {
-      const res = await axiosClient.post('/api/mentorships', {
+      const response = await axiosClient.post(`/api/mentorships`, {
         mentor_id: selectedMentor,
         se_id: selectedSocialEnterprise,
       });
 
-      // Success
-      console.log("Mentorship added successfully", res.data);
+      console.log("Mentorship added successfully");
 
+      // Close the dialog box
       setOpenDialog(false);
+
+      // Reset the form data
       setMentorshipData({ selectedMentor: "", selectedSocialEnterprise: "" });
 
+      // Show success popup
       setSnackbarMessage("Mentorship added successfully!");
       setSnackbarSeverity("success");
-      setSnackbarOpen(true);
+      setSnackbarOpen(true); // Ensure setSnackbarOpen is defined
 
-      // Prefer refetching data instead of full reload
-      if (typeof fetchLatestMentorships === "function") {
-        await fetchLatestMentorships();
-      } else {
-        setTimeout(() => window.location.reload(), 800);
-      }
+      // Fetch latest data
+      await fetchLatestMentorships();
+
+      // Refresh the page after a short delay to ensure updates are reflected
+      await new Promise((r) => setTimeout(r, 1000));
+      window.location.reload();
     } catch (error) {
       console.error("Failed to add mentorship:", error);
-      setSnackbarMessage(error?.response?.data?.message || "Failed to add mentorship.");
-      setSnackbarSeverity("error");
-      setSnackbarOpen(true);
     }
   };
 

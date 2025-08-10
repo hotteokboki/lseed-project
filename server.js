@@ -4412,23 +4412,6 @@ app.put("/api/application/:id/status", async (req, res) => {
   }
 });
 
-// PUT route to update mentor application status
-app.put("/api/mentor-application/:id/status", async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
-
-  try {
-    await pgDatabase.query(
-      `UPDATE mentor_form_application SET status = $1 WHERE id = $2`,
-      [status, id]
-    );
-    res.sendStatus(200);
-  } catch (error) {
-    console.error("❌ Failed to update status:", error);
-    res.sendStatus(500);
-  }
-});
-
 // Notification is_read update
 app.put("/api/notifications/:notificationId/read", async (req, res) => {
   const { notificationId } = req.params;

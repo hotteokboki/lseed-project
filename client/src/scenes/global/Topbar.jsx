@@ -7,18 +7,17 @@ import {
   Typography,
   useTheme,
   Divider,
-  FormControlLabel, // 1. Import FormControlLabel for the toggle switch label
-  Switch, // 2. Import Switch component
+  FormControlLabel,
+  Switch,
 } from "@mui/material";
-import Badge from '@mui/material/Badge';
-import { useContext, useState, useEffect, useRef } from "react";
+import Badge from "@mui/material/Badge";
+import { useContext, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ColorModeContext, tokens } from "../../theme";
 import InputBase from "@mui/material/InputBase";
 import LightModeOutlinedIcon from "@mui/icons-material/LightModeOutlined";
 import DarkModeOutlinedIcon from "@mui/icons-material/DarkModeOutlined";
 import NotificationsOutlinedIcon from "@mui/icons-material/NotificationsOutlined";
-import SettingsOutlinedIcon from "@mui/icons-material/SettingsOutlined";
 import PersonOutlinedIcon from "@mui/icons-material/PersonOutlined";
 import SearchIcon from "@mui/icons-material/Search";
 import ExitToAppOutlinedIcon from "@mui/icons-material/ExitToAppOutlined";
@@ -27,27 +26,24 @@ import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import axiosClient from "../../api/axiosClient";
 
-// 3. Destructure the new props from the function signature
-const Topbar = ({ }) => {
+const Topbar = ({ notifications, setNotifications }) => {
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
   const colorMode = useContext(ColorModeContext);
   const [anchorEl, setAnchorEl] = useState(null);
   const [notifAnchorEl, setNotifAnchorEl] = useState(null);
   const navigate = useNavigate();
-  const [notifications, setNotifications] = useState([]);
-  const unreadCount = notifications.filter((n) => !n.is_read).length;
+  const unreadCount = (notifications || []).filter((n) => !n.is_read).length;
   const [expandedNotificationId, setExpandedNotificationId] = useState(null);
   const { logout, user, isMentorView, toggleView } = useAuth();
+
   const handleMenuOpen = (event) => setAnchorEl(event.currentTarget);
   const handleMenuClose = () => setAnchorEl(null);
   const handleNotifOpen = (event) => setNotifAnchorEl(event.currentTarget);
   const handleNotifClose = () => setNotifAnchorEl(null);
 
   const handleToggleExpand = async (notifId) => {
-    setExpandedNotificationId((prev) =>
-      prev === notifId ? null : notifId
-    );
+    setExpandedNotificationId((prev) => (prev === notifId ? null : notifId));
     await markNotificationAsRead(notifId);
   };
 
@@ -55,60 +51,17 @@ const Topbar = ({ }) => {
     navigate(notif.target_route || "/");
   };
 
-  const fetchNotifications = async () => {
-    try {
-      if (!user?.id) return;
-      const { data } = await axiosClient.get('/api/notifications', {
-        params: { receiver_id: user.id },
-      });
-      setNotifications(data);
-    } catch (error) {
-      console.error("❌ Error fetching notifications:", error);
-    }
-  };
-
-  useEffect(() => {
-    if (!user?.id) return;
-
-    // start immediately once, then poll
-    let intervalId = null;
-
-    const start = () => {
-      fetchNotifications();
-      intervalId = setInterval(fetchNotifications, 15000); // 15s
-    };
-
-    const stop = () => {
-      if (intervalId) clearInterval(intervalId);
-      intervalId = null;
-    };
-
-    const onVisibility = () => {
-      if (document.hidden) {
-        stop();
-      } else {
-        start(); // resume immediately
-      }
-    };
-
-    start();
-    document.addEventListener("visibilitychange", onVisibility);
-
-    return () => {
-      stop();
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, [user?.id]);
-
   const markNotificationAsRead = async (notificationId) => {
-    await axiosClient.put(`/api/notifications/${notificationId}/read`);
-
-    // Update local state
-    setNotifications((prev) =>
-      prev.map((n) =>
-        n.notification_id === notificationId ? { ...n, is_read: true } : n
-      )
-    );
+    try {
+      await axiosClient.put(`/api/notifications/${notificationId}/read`);
+      setNotifications((prev) =>
+        prev.map((n) =>
+          n.notification_id === notificationId ? { ...n, is_read: true } : n
+        )
+      );
+    } catch (e) {
+      console.error("Failed to mark notification as read:", e);
+    }
   };
 
   const hasBothRoles =
@@ -118,11 +71,7 @@ const Topbar = ({ }) => {
   return (
     <Box display="flex" justifyContent="space-between" p={2}>
       {/* Search Bar */}
-      <Box
-        display="flex"
-        backgroundColor={colors.primary[400]}
-        borderRadius="3px"
-      >
+      <Box display="flex" backgroundColor={colors.primary[400]} borderRadius="3px">
         <InputBase sx={{ ml: 2, flex: 1 }} placeholder="Search" />
         <IconButton type="button" sx={{ p: 1 }}>
           <SearchIcon />
@@ -131,14 +80,13 @@ const Topbar = ({ }) => {
 
       {/* Icons */}
       <Box display="flex">
-        {/* Toggle Switch - Now using state and handler from context */}
         {hasBothRoles && (
           <Box display="flex" alignItems="center" mr={2}>
             <FormControlLabel
               control={
                 <Switch
-                  checked={isMentorView} // ⭐️ Use isMentorView from context
-                  onChange={toggleView} // ⭐️ Use the toggleView function from context
+                  checked={isMentorView}
+                  onChange={toggleView}
                   color="secondary"
                 />
               }
@@ -152,11 +100,7 @@ const Topbar = ({ }) => {
         )}
 
         <IconButton onClick={colorMode.toggleColorMode}>
-          {theme.palette.mode === "dark" ? (
-            <DarkModeOutlinedIcon />
-          ) : (
-            <LightModeOutlinedIcon />
-          )}
+          {theme.palette.mode === "dark" ? <DarkModeOutlinedIcon /> : <LightModeOutlinedIcon />}
         </IconButton>
 
         {/* Notifications Button */}
@@ -173,17 +117,16 @@ const Topbar = ({ }) => {
           onClose={handleNotifClose}
           sx={{
             "& .MuiPaper-root": {
-              width: "400px", // ✅ Increased width for better content display
+              width: 400,
               backgroundColor: "#fff",
               color: "#000",
               border: "1px solid #000",
-              boxShadow: "0px 4px 10px rgba(0, 0, 0, 0.2)",
-              maxHeight: "400px", // ✅ Increased height
+              boxShadow: "0px 4px 10px rgba(0,0,0,0.2)",
+              maxHeight: 400,
               overflowY: "auto",
             },
           }}
         >
-          {/* Header */}
           <Typography
             sx={{
               backgroundColor: "#1E4D2B",
@@ -192,7 +135,7 @@ const Topbar = ({ }) => {
               fontSize: "1.2rem",
               fontWeight: "bold",
               padding: "10px",
-              position: "sticky", // ✅ Keep header visible while scrolling
+              position: "sticky",
               top: 0,
               zIndex: 1,
             }}
@@ -200,14 +143,8 @@ const Topbar = ({ }) => {
             Notifications
           </Typography>
 
-          {/* Notification Items Container */}
-          <Box
-            sx={{
-              maxHeight: "340px", // Container height for vertical scrolling
-              overflowY: "auto",
-            }}
-          >
-            {notifications.length > 0 ? (
+          <Box sx={{ maxHeight: 340, overflowY: "auto" }}>
+            {(notifications || []).length > 0 ? (
               notifications.map((notif, index) => (
                 <Box key={notif.notification_id}>
                   <MenuItem
@@ -216,31 +153,17 @@ const Topbar = ({ }) => {
                       display: "flex",
                       flexDirection: "column",
                       alignItems: "flex-start",
-                      padding: "12px",
+                      p: 1.5,
                       backgroundColor: notif.is_read ? "inherit" : colors.greenAccent[100],
                       "&:hover": { backgroundColor: "#f0f0f0" },
-                      cursor: "pointer",
-                      textDecoration: "none",
-                      color: "inherit",
                     }}
                   >
-                    <Box
-                      sx={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        width: "100%",
-                        alignItems: "center",
-                      }}
-                    >
+                    <Box sx={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center" }}>
                       <Typography sx={{ fontWeight: "bold", flexGrow: 1 }}>
                         {notif.title}
                       </Typography>
                       <IconButton size="small" sx={{ color: "black" }}>
-                        {expandedNotificationId === notif.notification_id ? (
-                          <ExpandLessIcon />
-                        ) : (
-                          <ExpandMoreIcon />
-                        )}
+                        {expandedNotificationId === notif.notification_id ? <ExpandLessIcon /> : <ExpandMoreIcon />}
                       </IconButton>
                     </Box>
 
@@ -249,32 +172,22 @@ const Topbar = ({ }) => {
                         sx={{
                           mt: 1,
                           width: "100%",
-                          padding: "8px",
-                          borderRadius: "4px",
+                          p: 1,
+                          borderRadius: 1,
                           backgroundColor: "#f9f9f9",
                           border: "1px solid #ddd",
                           display: "flex",
                           flexDirection: "column",
-                          gap: "8px",
+                          gap: 1,
                           wordWrap: "break-word",
                           overflowWrap: "break-word",
                         }}
                       >
-                        <Typography
-                          variant="body2"
-                          sx={{
-                            whiteSpace: "pre-wrap",
-                            wordBreak: "break-word",
-                            overflowWrap: "break-word",
-                          }}
-                        >
+                        <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
                           {notif.message}
                         </Typography>
 
-                        <Typography
-                          variant="caption"
-                          color="gray"
-                        >
+                        <Typography variant="caption" color="gray">
                           {new Date(notif.created_at).toLocaleString()}
                         </Typography>
 
@@ -294,27 +207,16 @@ const Topbar = ({ }) => {
                 </Box>
               ))
             ) : (
-              <MenuItem sx={{ textAlign: "center", padding: "15px" }}>
-                No new notifications
-              </MenuItem>
+              <MenuItem sx={{ textAlign: "center", p: 2 }}>No new notifications</MenuItem>
             )}
           </Box>
         </Menu>
-
-        {/* <IconButton>
-              <SettingsOutlinedIcon />
-            </IconButton> 
-            */}
 
         <IconButton onClick={handleMenuOpen}>
           <PersonOutlinedIcon />
         </IconButton>
 
-        <Menu
-          anchorEl={anchorEl}
-          open={Boolean(anchorEl)}
-          onClose={handleMenuClose}
-        >
+        <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={handleMenuClose}>
           <MenuItem
             onClick={() => {
               handleMenuClose();
@@ -328,11 +230,7 @@ const Topbar = ({ }) => {
               logout();
               navigate("/");
             }}
-            icon={<ExitToAppOutlinedIcon />}
-            style={{
-              color: colors.redAccent[400],
-              marginTop: "20px",
-            }}
+            style={{ color: colors.redAccent[400], marginTop: 20 }}
           >
             <Typography>Logout</Typography>
           </MenuItem>
