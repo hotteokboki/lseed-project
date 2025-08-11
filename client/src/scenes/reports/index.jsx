@@ -14,6 +14,7 @@ import {
 import Header from "../../components/Header";
 import { tokens } from "../../theme";
 import * as XLSX from "xlsx";
+import axiosClient from "../../api/axiosClient";
 
 const Reports = () => {
   const theme = useTheme();
@@ -435,15 +436,12 @@ const Reports = () => {
       });
 
       try {
-        await axios.post(
-          `${process.env.REACT_APP_API_BASE_URL}/api/import/${reportType}`,
+        await axiosClient.post(
+          `/api/import/${reportType}`,
           {
             se_id: selectedSE,
             data: dataToImport,
           },
-          {
-            withCredentials: true,
-          }
         );
         console.log(`${formatTableName(reportType)} import successful!`);
       } catch (err) {
@@ -487,7 +485,7 @@ const Reports = () => {
   useEffect(() => {
     const fetchSEs = async () => {
       try {
-        const response = await axios.get(`${process.env.REACT_APP_API_BASE_URL}/getAllSocialEnterprisesForComparison`);
+        const response = await axiosClient.get(`/api/getAllSocialEnterprisesForComparison`);
         setSocialEnterprises(response.data);
       } catch (error) {
         console.error("Error fetching SE list:", error);

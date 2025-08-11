@@ -9,9 +9,9 @@ const router = express.Router();
 
 router.use(cookieParser()); // Middleware to parse cookies
 
-router.post("/", login);
+// router.post("/", login);
 router.post('/forgot-password', forgotPassword);
-router.get("/logout", logout);
+// router.get("/logout", logout);
 router.get("/protected", protectedRoute);
 
 const saltRounds = 10;
@@ -19,11 +19,6 @@ const saltRounds = 10;
 // const sessionId = crypto.randomUUID();
 
 const requireAuth = (req, res, next) => {
-  // console.log("🔹 Checking authentication...");
-  // console.log("🔹 Session Data:", req.session); // Log the session object
-  // console.log("🔹 Cookies:", req.cookies); // Log received cookies
-  // console.log("🔹 Headers:", req.headers); // Log headers to check for missing JWT
-
   if (!req.session || !req.session.user) {
     console.log("🚨 Unauthorized: No session found.");
     return res.status(401).json({ error: "Unauthorized: No session found." });
@@ -33,8 +28,6 @@ const requireAuth = (req, res, next) => {
   // Add additional validation, like checking the session ID in a database or store if needed.
   next();
 };
-
-
 
 router.post('/reset-password', async (req, res) => {
   const { token, newPassword } = req.body;
@@ -84,97 +77,85 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
-router.post('/login', async (req, res) => {
-  const { email, password } = req.body;
+// router.post('/login', async (req, res) => {
+//   const { email, password } = req.body;
 
-  try {
-    // Query to fetch user data from PostgreSQL
-    const result = await pgDatabase.query('SELECT * FROM users WHERE email = $1', [email]);
-    const user = result.rows[0]; // Assuming email is unique, we take the first result
+//   try {
+//     // Query to fetch user data from PostgreSQL
+//     const result = await pgDatabase.query('SELECT * FROM users WHERE email = $1', [email]);
+//     const user = result.rows[0]; // Assuming email is unique, we take the first result
 
-    console.log("[Login Route] Fetched user from DB:", user);
+//     console.log("[Login Route] Fetched user from DB:", user);
 
-    if (!user) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
+//     if (!user) {
+//       return res.status(401).json({ message: 'Invalid credentials' });
+//     }
 
-    // Verify password
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
+//     // Verify password
+//     const isPasswordValid = await bcrypt.compare(password, user.password);
+//     if (!isPasswordValid) {
+//       return res.status(401).json({ message: 'Invalid credentials' });
+//     }
 
-    console.log("[Login Route] User object before session storage:", user);
+//     console.log("[Login Route] User object before session storage:", user);
 
-    // Check if account is active
-    if (!user.isactive) {
-      return res.status(403).json({ message: 'Your account is pending verification. Please wait for LSEED to verify your account.' });
-    }
+//     // Check if account is active
+//     if (!user.isactive) {
+//       return res.status(403).json({ message: 'Your account is pending verification. Please wait for LSEED to verify your account.' });
+//     }
 
-    // ✅ Generate a unique session ID
-    const sessionId = crypto.randomUUID();
+//     // ✅ Generate a unique session ID
+//     const sessionId = crypto.randomUUID();
 
-    try {
-      console.log('[authRoutes] Inserting session into active_sessions');
-      // ✅ Insert the session ID into `active_sessions`
-      const sessionInsertQuery = `
-        INSERT INTO active_sessions (session_id, user_id) VALUES ($1, $2)
-      `;
-      await pgDatabase.query(sessionInsertQuery, [sessionId, user.user_id]);
+//     try {
+//       console.log('[authRoutes] Inserting session into active_sessions');
+//       // ✅ Insert the session ID into `active_sessions`
+//       const sessionInsertQuery = `
+//         INSERT INTO active_sessions (session_id, user_id) VALUES ($1, $2)
+//       `;
+//       await pgDatabase.query(sessionInsertQuery, [sessionId, user.user_id]);
       
-    } catch (error) {
-      console.error('Error inserting session:', error);
-    }
-    console.log("[authRoutes] Session ID (global):", sessionId);
+//     } catch (error) {
+//       console.error('Error inserting session:', error);
+//     }
+//     console.log("[authRoutes] Session ID (global):", sessionId);
 
-    // ✅ Store user details in the session
-    req.session.user = {
-      id: user.user_id,
-      email: user.email,
-      role: user.cleanedRoles,
-      firstName: user.first_name,
-      lastName: user.last_name,
-      sessionId: sessionId,
-    };
+//     // ✅ Store user details in the session
+//     req.session.user = {
+//       id: user.user_id,
+//       email: user.email,
+//       role: user.cleanedRoles,
+//       firstName: user.first_name,
+//       lastName: user.last_name,
+//       sessionId: sessionId,
+//     };
 
-    console.log("[authRoutes] Session after login:", req.session.user.sessionId); // Add this log
+//     console.log("[authRoutes] Session after login:", req.session.user.sessionId); // Add this log
 
-    // ✅ Set session ID in a cookie
-    res.cookie("session_id", sessionId, { httpOnly: true, secure: false });
+//     // ✅ Set session ID in a cookie
+//     res.cookie("session_id", sessionId, { httpOnly: true, secure: false });
 
-    // Separate handling for admin and normal users
-    if (user.roles === "Administrator") {
-      return res.json({
-        message: "Admin login successful",
-        user: { id: user.user_id, email: user.email, role: user.roles },
-        session_id: sessionId,
-        redirect: "/admin",
-      });
-    } else {
-      return res.json({
-        message: "User login successful",
-        user: { id: user.user_id, email: user.email, role: user.roles, firstname: user.first_name, lastname: user.last_name },
-        session_id: sessionId,
-        redirect: "/dashboard", // Normal users go to their dashboard
-      });
-    }
-  } catch (error) {
-    console.error('Login Error:', error);
-    res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-router.get("/session-check", (req, res) => {
-  console.log("🔍 [routes] Checking session...");
-  console.log("🔹 [routes] Cookies Received:", req.cookies); // Log cookies
-  console.log("🔹 [routes] Session Data:", req.session); // Log session data
-
-  if (req.session && req.session.user) {
-    return res.json({ sessionUser: req.session.user.id });
-  } else {
-    return res.status(401).json({ message: "No active session" });
-  }
-});
+//     // Separate handling for admin and normal users
+//     if (user.roles === "Administrator") {
+//       return res.json({
+//         message: "Admin login successful",
+//         user: { id: user.user_id, email: user.email, role: user.roles },
+//         session_id: sessionId,
+//         redirect: "/admin",
+//       });
+//     } else {
+//       return res.json({
+//         message: "User login successful",
+//         user: { id: user.user_id, email: user.email, role: user.roles, firstname: user.first_name, lastname: user.last_name },
+//         session_id: sessionId,
+//         redirect: "/dashboard", // Normal users go to their dashboard
+//       });
+//     }
+//   } catch (error) {
+//     console.error('Login Error:', error);
+//     res.status(500).json({ message: 'Internal server error' });
+//   }
+// });
 
 router.get("/users", async (req, res) => {
   try {

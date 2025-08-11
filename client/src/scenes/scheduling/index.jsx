@@ -35,7 +35,6 @@ import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import { DatePicker } from "@mui/x-date-pickers";
 import { useAuth } from "../../context/authContext";
 import Header from "../../components/Header";
-import axios from "axios";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
 import timezone from "dayjs/plugin/timezone";
@@ -46,7 +45,7 @@ import axiosClient from "../../api/axiosClient";
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-const Scheduling = ({}) => {
+const Scheduling = ({ }) => {
   const [openModal, setOpenModal] = useState(false);
   const [openSEModal, setOpenSEModal] = useState(false);
   const [mentors, setMentors] = useState([]);
@@ -61,7 +60,8 @@ const Scheduling = ({}) => {
   const colors = tokens(theme.palette.mode);
   const [selectedTime, setSelectedTime] = useState(dayjs().startOf("hour"));
   const now = dayjs();
-  {/* REFERENCE DELETE THIS LATER ON FOR SNACKBAR */}
+  const isToday = selectedDate?.isValid?.() && selectedDate.isSame(now, 'day');
+  {/* REFERENCE DELETE THIS LATER ON FOR SNACKBAR */ }
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMessage, setSnackbarMessage] = useState("");
   const [snackbarSeverity, setSnackbarSeverity] = useState("success");
@@ -102,45 +102,28 @@ const Scheduling = ({}) => {
   const timeSlots = generateTimeSlots();
 
   const handleAcceptClick = async (schedule) => {
-   try {
-      const {
-        id,
+    try {
+      const { id, mentorship_id, realDate, realTime, zoom } = schedule;
+
+      const response = await axiosClient.post('/api/approve-mentorship', {
+        mentoring_session_id: id,
         mentorship_id,
-        realDate,
-        realTime,
-        zoom,
-      } = schedule;
+        mentorship_date: realDate,
+        mentorship_time: realTime,
+        zoom_link: zoom,
+      });
 
-      const response = await fetch(
-        `${process.env.REACT_APP_API_BASE_URL}/approveMentorship`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            mentoring_session_id: id,
-            mentorship_id,
-            mentorship_date: realDate,
-            mentorship_time: realTime,
-            zoom_link: zoom,
-          }),
-        }
-      );
-
-      if (!response.ok) {
-        const errorMessage = await response.text();
-        throw new Error(`Failed to approve mentorship: ${errorMessage}`);
-      }
-
-      setSnackbarMessage(
-        "Mentoring session accepted. Awaiting SE confirmation."
-      );
+      // ✅ Set success snackbar
+      setSnackbarMessage("Mentoring session approved, sent to Social Enterprise");
       setSnackbarSeverity("success");
       setSnackbarOpen(true);
-      setTimeout(() => {
-        window.location.reload();
-      }, 500);
     } catch (error) {
       console.error("Error approving mentorship:", error);
+
+      // ❌ Set error snackbar
+      setSnackbarMessage(error?.response?.data?.message || "Failed to approve mentorship");
+      setSnackbarSeverity("error");
+      setSnackbarOpen(true);
     }
   };
 
@@ -201,9 +184,8 @@ const Scheduling = ({}) => {
       icsContent += `DESCRIPTION:Mentor: ${session.mentor_name}\\nProgram: ${session.program_name}\\nStatus: ${session.status}\r\n`;
       icsContent += `DTSTART:${startDate}\r\n`;
       icsContent += `DTEND:${endDate}\r\n`;
-      icsContent += `LOCATION:${
-        session.zoom_link ? session.zoom_link : "TBD"
-      }\r\n`;
+      icsContent += `LOCATION:${session.zoom_link ? session.zoom_link : "TBD"
+        }\r\n`;
       icsContent += `STATUS:CONFIRMED\r\n`;
       icsContent += `END:VEVENT\r\n`;
     });
@@ -250,32 +232,25 @@ const Scheduling = ({}) => {
 
   const handleDeclineClick = async (schedule) => {
     try {
-      const { id } = schedule;
+      const { id } = schedule; // Extract ID
 
-      const response = await fetch(
-        `${process.env.REACT_APP_API_BASE_URL}/declineMentorship`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            mentoring_session_id: id,
-          }),
-        }
-      );
+      const response = await axiosClient.post('/api/decline-mentorship', {
+        mentoring_session_id: id,
+      });
 
-      if (!response.ok) {
-        const errorMessage = await response.text();
-        throw new Error(`Failed to decline mentorship: ${errorMessage}`);
-      }
+      console.log("Mentorship declined successfully", response.data);
 
-      setSnackbarMessage("Mentoring session declined.");
+      // ✅ Success Snackbar
+      setSnackbarMessage("Mentoring Session declined successfully");
       setSnackbarSeverity("success");
       setSnackbarOpen(true);
-      setTimeout(() => {
-        window.location.reload();
-      }, 500);
     } catch (error) {
       console.error("Error declining mentorship:", error);
+
+      // ❌ Error Snackbar
+      setSnackbarMessage(error?.response?.data?.message || "Failed to decline mentorship");
+      setSnackbarSeverity("error");
+      setSnackbarOpen(true);
     }
   };
 
@@ -315,8 +290,8 @@ const Scheduling = ({}) => {
     const fetchMentorshipDates = async () => {
       try {
         console.log("mentor_id: ", user.id);
-        const response = await axios.get(
-          `${process.env.REACT_APP_API_BASE_URL}/getMentorshipDates`,
+        const response = await axiosClient.get(
+          `/api/get-mentorship-dates`,
           {
             params: { mentor_id: user.id }, // Fetch mentorships for this mentor
           }
@@ -335,12 +310,7 @@ const Scheduling = ({}) => {
   useEffect(() => {
     const fetchMentorPendingSessions = async () => {
       try {
-        const res = await axios.get(
-          `${process.env.REACT_APP_API_BASE_URL}/api/get-mentor-pending-sessions`,
-          {
-            withCredentials: true,
-          }
-        );
+        const res = await axiosClient.get(`/api/get-mentor-pending-sessions`);
         setMentorPendingSessions(res.data || []);
       } catch (error) {
         console.error("❌ Error fetching mentor pending sessions:", error);
@@ -361,12 +331,7 @@ const Scheduling = ({}) => {
         const isLSEEDUser = roles.some((role) => role.startsWith("LSEED"));
 
         if (isMentor) {
-          const mentorRes = await axios.get(
-            `${process.env.REACT_APP_API_BASE_URL}/api/mentorSchedulesByID`,
-            {
-              withCredentials: true,
-            }
-          );
+          const mentorRes = await axiosClient.get(`/api/mentor-schedules-by-id`);
           setMentorOwnHistory(mentorRes.data || []);
         }
 
@@ -402,9 +367,8 @@ const Scheduling = ({}) => {
   const formatRows = (data) =>
     data.map((mentorship) => ({
       id: mentorship.mentoring_session_id,
-      sessionDetails: `${mentorship.status} Mentoring Session for ${
-        mentorship.team_name || "Unknown SE"
-      } with Mentor ${mentorship.mentor_name || "Unknown Mentor"}`,
+      sessionDetails: `${mentorship.status} Mentoring Session for ${mentorship.team_name || "Unknown SE"
+        } with Mentor ${mentorship.mentor_name || "Unknown Mentor"}`,
       program_name: mentorship.program_name || "N/A",
       date:
         `${mentorship.mentoring_session_date}, ${mentorship.mentoring_session_time}` ||
@@ -418,10 +382,10 @@ const Scheduling = ({}) => {
     try {
       setIsLoading(true);
 
-      const response = await fetch(
-        `${process.env.REACT_APP_API_BASE_URL}/getMentorshipsbyID?mentor_id=${encodeURIComponent(user.id)}`
+      const response = await axiosClient.get(
+        `/api/get-mentorships-by-id?mentor_id=${encodeURIComponent(user.id)}`
       );
-      const data = await response.json();
+      const data = response.data;
 
       console.log("📥 Received Data in Scheduling:", data);
 
@@ -435,10 +399,10 @@ const Scheduling = ({}) => {
 
       for (const se of data) {
         try {
-          const checkResponse = await fetch(
-            `${process.env.REACT_APP_API_BASE_URL}/checkTelegramRegistration?mentor_id=${encodeURIComponent(se.mentor_id)}&se_id=${encodeURIComponent(se.se_id)}`
+          const checkResponse = await axiosClient.get(
+            `/api/check-telegram-registration?mentor_id=${encodeURIComponent(se.mentor_id)}&se_id=${encodeURIComponent(se.se_id)}`
           );
-          const checkData = await checkResponse.json();
+          const checkData = checkResponse.data;
 
           updatedSocialEnterprises.push({
             id: se.id,
@@ -546,19 +510,10 @@ const Scheduling = ({}) => {
 
       console.log("📤 Sending Data:", requestBody);
 
-      const response = await fetch(
-        `${process.env.REACT_APP_API_BASE_URL}/updateMentorshipDate`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(requestBody),
-        }
+      const response = await axiosClient.post(
+        `/api/update-mentorship-date`,
+        requestBody
       );
-
-      if (!response.ok) {
-        const errorMessage = await response.json().catch(() => response.text());
-        throw new Error(`Failed to update: ${JSON.stringify(errorMessage)}`);
-      }
 
       setSnackbarMessage(
         `Mentoring Session with ${teamName} on ${displayDate} at ${displayStartTime} - ${displayEndTime} scheduled successfully!`
@@ -694,21 +649,6 @@ const Scheduling = ({}) => {
   ];
 
   useEffect(() => {
-    fetch("/auth/session-check", {
-      method: "GET",
-      credentials: "include", // ✅ Required for sending cookies
-      headers: {
-        "Content-Type": "application/json",
-      },
-    })
-      .then((response) => response.json())
-      .then((data) => console.log("[Frontend] Session Check Response:", data))
-      .catch((error) =>
-        console.error("[Frontend] Session Check Error:", error)
-      );
-  }, []);
-
-  useEffect(() => {
     const fetchMentorSchedules = async () => {
       try {
         let response;
@@ -774,7 +714,7 @@ const Scheduling = ({}) => {
         >
           {/* Open LSEED Calendar Button */}
           {/* Visible if user has any LSEED role AND (is not a mentor OR is in coordinator view) */}
-            
+
 
           {/* Schedule a Mentoring Session Button */}
           {/* Visible if user has Mentor role AND (is not an LSEED user OR is in mentor view) */}
@@ -875,9 +815,8 @@ const Scheduling = ({}) => {
                 <DataGrid
                   rows={mentorSchedules.map((schedule) => ({
                     id: schedule.mentoring_session_id,
-                    sessionDetails: `Mentoring Session for ${
-                      schedule.team_name || "Unknown SE"
-                    } with Mentor ${schedule.mentor_name || "Unknown Mentor"}`,
+                    sessionDetails: `Mentoring Session for ${schedule.team_name || "Unknown SE"
+                      } with Mentor ${schedule.mentor_name || "Unknown Mentor"}`,
                     date:
                       `${schedule.mentoring_session_date}, ${schedule.mentoring_session_time}` ||
                       "N/A",
@@ -1041,9 +980,9 @@ const Scheduling = ({}) => {
                 minHeight="400px"
                 sx={{
                   "& .MuiDataGrid-scrollbarFiller, & .MuiDataGrid-scrollbarFiller--header":
-                    {
-                      backgroundColor: colors.blueAccent[700] + " !important",
-                    },
+                  {
+                    backgroundColor: colors.blueAccent[700] + " !important",
+                  },
                   "& .MuiDataGrid-root": { border: "none" },
                   "& .MuiDataGrid-cell": { borderBottom: "none" },
                   "& .MuiDataGrid-columnHeaders, & .MuiDataGrid-columnHeader": {
@@ -1246,9 +1185,9 @@ const Scheduling = ({}) => {
                     "& .MuiDataGrid-root": { border: "none" },
                     "& .MuiDataGrid-cell": { borderBottom: "none" },
                     "& .MuiDataGrid-columnHeaders, & .MuiDataGrid-columnHeader":
-                      {
-                        backgroundColor: colors.blueAccent[700] + " !important",
-                      },
+                    {
+                      backgroundColor: colors.blueAccent[700] + " !important",
+                    },
                     "& .MuiDataGrid-virtualScroller": {
                       backgroundColor: colors.primary[400],
                     },
@@ -1361,14 +1300,14 @@ const Scheduling = ({}) => {
                           session.status === "Pending SE"
                             ? "warning"
                             : session.status === "Accepted"
-                            ? "success"
-                            : session.status === "Declined"
-                            ? "error"
-                            : session.status === "Evaluated"
-                            ? "info"
-                            : session.status === "Completed"
-                            ? "primary"
-                            : "default"
+                              ? "success"
+                              : session.status === "Declined"
+                                ? "error"
+                                : session.status === "Evaluated"
+                                  ? "info"
+                                  : session.status === "Completed"
+                                    ? "primary"
+                                    : "default"
                         }
                       />
                     </Box>
@@ -1557,7 +1496,7 @@ const Scheduling = ({}) => {
                     label="Start Time"
                     value={startTime}
                     onChange={handleStartTimeChange}
-                    minTime={now}
+                    minTime={isToday ? now : dayjs().startOf('day')} 
                     slotProps={{
                       textField: {
                         fullWidth: true,
@@ -1603,7 +1542,7 @@ const Scheduling = ({}) => {
                   <TimePicker
                     label="End Time"
                     value={endTime}
-                    minTime={startTime} // Prevents selecting a time before the start
+                    minTime={startTime || (isToday ? now : dayjs().startOf('day'))}
                     onChange={handleEndTimeChange}
                     slotProps={{
                       textField: {

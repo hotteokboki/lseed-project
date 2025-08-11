@@ -1,8 +1,8 @@
 const pgDatabase = require('../database.js'); // Import PostgreSQL client
 
 exports.getMentorshipsByMentorId = async (mentor_id) => {
-    try {
-        const query = `
+  try {
+    const query = `
             SELECT 
                 ms.mentoring_session_id, -- ✅ Add to GROUP BY
                 m.mentor_firstname || ' ' || m.mentor_lastname AS mentor_name, -- ✅ Mentor assigned
@@ -34,15 +34,15 @@ exports.getMentorshipsByMentorId = async (mentor_id) => {
                 mentoring_session_date
             ORDER BY ms.start_time DESC; -- ✅ Show most recent sessions first
         `;
-    
-        const values = [mentor_id];
-        const result = await pgDatabase.query(query, values);
-    
-        return result.rows.length ? result.rows : [];
-    } catch (error) {
-        console.error("❌ Error fetching mentorships by mentor_id:", error);
-        return []; // Return an empty array in case of an error
-    }
+
+    const values = [mentor_id];
+    const result = await pgDatabase.query(query, values);
+
+    return result.rows.length ? result.rows : [];
+  } catch (error) {
+    console.error("❌ Error fetching mentorships by mentor_id:", error);
+    return []; // Return an empty array in case of an error
+  }
 };
 
 exports.getCollaborators = async (mentor_id) => {
@@ -95,48 +95,47 @@ exports.getCollaborators = async (mentor_id) => {
 };
 
 exports.getMentorshipsForScheduling = async (mentor_id) => {
-    try {
-        const query = `
-          SELECT 
-              ms.mentorship_id AS id, 
-              m.mentor_id, 
-              CONCAT(m.mentor_firstname, ' ', m.mentor_lastname) AS Mentor, 
-              se.se_id,
-              se.team_name AS SE, 
-              p."name" AS Program, 
-              STRING_AGG(sdg."name", ', ') AS SDGs,
-              se.preferred_mentoring_time,
-              se.mentoring_time_note
-          FROM mentorships AS ms
-          JOIN socialenterprises AS se ON ms.se_id = se.se_id
-          JOIN mentors AS m ON m.mentor_id = ms.mentor_id
-          JOIN programs AS p ON se.program_id = p.program_id
-          JOIN sdg AS sdg ON sdg.sdg_id = ANY(se.sdg_id)
+  try {
+    const query = `
+      SELECT
+        ms.mentorship_id AS id,
+        m.mentor_id,
+        CONCAT(m.mentor_firstname, ' ', m.mentor_lastname) AS mentor,
+        se.se_id,
+        se.team_name AS se,
+        p."name" AS program,
+        STRING_AGG(sdg."name", ', ') AS sdgs,
+        se.preferred_mentoring_time,
+        se.mentoring_time_note
+      FROM mentorships AS ms
+      JOIN socialenterprises AS se ON ms.se_id = se.se_id
+      JOIN mentors AS m ON m.mentor_id = ms.mentor_id
+      JOIN programs AS p ON se.program_id = p.program_id
+      JOIN sdg AS sdg ON sdg.sdg_id = ANY(se.sdg_id)
+      WHERE m.mentor_id = $1
+        AND NOT EXISTS (
+          SELECT 1
+          FROM mentoring_session AS s
+          WHERE s.mentorship_id = ms.mentorship_id
+            AND s.status IN ('Pending', 'Pending SE', 'Accepted', 'In Progress')
+        )
+      GROUP BY
+        ms.mentorship_id,
+        m.mentor_id,
+        CONCAT(m.mentor_firstname, ' ', m.mentor_lastname),
+        se.se_id,
+        se.team_name,
+        p."name",
+        se.preferred_mentoring_time,
+        se.mentoring_time_note
+    `;
 
-          -- THIS LEFT JOIN WILL CHECK IF THERE IS A SESSION
-          LEFT JOIN mentoring_session AS session ON session.mentorship_id = ms.mentorship_id
-
-          -- EXCLUDE mentorships that have a session already
-          WHERE m.mentor_id = $1
-            AND session.mentorship_id IS NULL
-
-          GROUP BY 
-              ms.mentorship_id, 
-              m.mentor_id, 
-              Mentor, 
-              se.se_id, 
-              SE, 
-              Program;
-        `;
-    
-        const values = [mentor_id];
-        const result = await pgDatabase.query(query, values);
-    
-        return result.rows.length ? result.rows : [];
-    } catch (error) {
-        console.error("❌ Error fetching mentorships by mentor_id:", error);
-        return []; // Return an empty array in case of an error
-    }
+    const { rows } = await pgDatabase.query(query, [mentor_id]);
+    return rows;
+  } catch (error) {
+    console.error("❌ Error fetching options for mentoring session by mentor_id:", error);
+    return [];
+  }
 };
 
 exports.getMentorBySEID = async (se_id) => {
@@ -171,11 +170,11 @@ exports.getMentorBySEID = async (se_id) => {
 };
 
 exports.getSEWithMentors = async (program = null) => {
-    try {
-        let programFilter = program ? `AND p.name = '${program}'` : '';
+  try {
+    let programFilter = program ? `AND p.name = '${program}'` : '';
 
 
-        const query = `
+    const query = `
             SELECT COUNT(DISTINCT ms.se_id) AS total_se_with_mentors 
             FROM mentorships AS ms
 			JOIN socialenterprises AS s ON s.se_id = ms.se_id
@@ -184,17 +183,17 @@ exports.getSEWithMentors = async (program = null) => {
 			${programFilter};
         `;
 
-        const result = await pgDatabase.query(query);
-        return result.rows;
-    } catch (error) {
-        console.error("❌ Error fetching mentorships", error);
-        return []; // Return an empty array in case of an error
-    }
+    const result = await pgDatabase.query(query);
+    return result.rows;
+  } catch (error) {
+    console.error("❌ Error fetching mentorships", error);
+    return []; // Return an empty array in case of an error
+  }
 };
 
 exports.getHandledSEsCountByMentor = async (mentor_id) => {
   try {
-      const query = `
+    const query = `
           SELECT 
               mentor_id, 
               COUNT(DISTINCT se_id) AS num_se_handled
@@ -203,34 +202,34 @@ exports.getHandledSEsCountByMentor = async (mentor_id) => {
           GROUP BY mentor_id;
       `;
 
-      const result = await pgDatabase.query(query, [mentor_id]); // Correctly passing mentor_id
+    const result = await pgDatabase.query(query, [mentor_id]); // Correctly passing mentor_id
 
-      return result.rows[0]?.num_se_handled || 0; // Return the count or 0 if no data found
+    return result.rows[0]?.num_se_handled || 0; // Return the count or 0 if no data found
   } catch (error) {
-      console.error("❌ Error fetching mentorships:", error);
-      return 0; // Return 0 in case of an error
+    console.error("❌ Error fetching mentorships:", error);
+    return 0; // Return 0 in case of an error
   }
 };
 
 exports.getMentorshipCount = async () => {
-    try {
-        const query = `
+  try {
+    const query = `
             SELECT COUNT(DISTINCT m.mentor_id)
             FROM mentors m
             JOIN mentorships ms ON ms.mentor_id = m.mentor_id;
         `;
 
-        const result = await pgDatabase.query(query);
-        return result.rows;
-    } catch (error) {
-        console.error("❌ Error fetching mentorships", error);
-        return []; // Return an empty array in case of an error
-    }
+    const result = await pgDatabase.query(query);
+    return result.rows;
+  } catch (error) {
+    console.error("❌ Error fetching mentorships", error);
+    return []; // Return an empty array in case of an error
+  }
 };
 
 exports.getMentorSchedules = async () => {
-    try {
-      const query = `
+  try {
+    const query = `
         SELECT 
           m.mentor_id,
           m.mentor_firstname || ' ' || m.mentor_lastname AS mentor_name,
@@ -242,18 +241,18 @@ exports.getMentorSchedules = async () => {
         JOIN social_enterprises se ON ms.se_id = se.se_id
         WHERE ms.status = 'Active';
       `;
-  
-      const result = await pgDatabase.query(query);
-      if (!result.rows.length) {
-        console.log("⚠️ No active mentorships found.");
-        return [];
-      }
-  
-      return result.rows;
-    } catch (error) {
-      console.error("❌ Error fetching mentor schedules:", error);
+
+    const result = await pgDatabase.query(query);
+    if (!result.rows.length) {
+      console.log("⚠️ No active mentorships found.");
       return [];
     }
+
+    return result.rows;
+  } catch (error) {
+    console.error("❌ Error fetching mentor schedules:", error);
+    return [];
+  }
 };
 
 exports.getPendingSchedules = async (program = null, mentor_id) => {
@@ -305,11 +304,11 @@ exports.getPendingSchedules = async (program = null, mentor_id) => {
 };
 
 exports.getSchedulingHistory = async (program = null) => {
-    try {
-        
-        let programFilter = program ? `AND p.name = '${program}'` : '';
+  try {
 
-        const query = `
+    let programFilter = program ? `AND p.name = '${program}'` : '';
+
+    const query = `
             SELECT 
                 ms.mentoring_session_id,
                 m.mentorship_id, 
@@ -333,22 +332,22 @@ exports.getSchedulingHistory = async (program = null) => {
             ORDER BY ms.mentoring_session_date DESC, ms.start_time DESC;
         `;
 
-        const result = await pgDatabase.query(query);
-        if (!result.rows.length) {
-        console.log("No Pending Schedules found.");
-        return [];
-        }
-
-        return result.rows;
-    } catch (error) {
-        console.error("❌ Error fetching scheduling history schedules:", error);
-        return [];
+    const result = await pgDatabase.query(query);
+    if (!result.rows.length) {
+      console.log("No Pending Schedules found.");
+      return [];
     }
+
+    return result.rows;
+  } catch (error) {
+    console.error("❌ Error fetching scheduling history schedules:", error);
+    return [];
+  }
 };
 
 exports.getSchedulingHistoryByMentorID = async (mentor_id) => {
-    try {
-      const query = `
+  try {
+    const query = `
           SELECT 
               ms.mentoring_session_id,
               m.mentorship_id, 
@@ -372,23 +371,23 @@ exports.getSchedulingHistoryByMentorID = async (mentor_id) => {
           ORDER BY ms.mentoring_session_date, ms.start_time;
       `;
 
-      
-      const result = await pgDatabase.query(query, [mentor_id]);
-      if (!result.rows.length) {
-        console.log("No Schedules found.");
-        return [];
-      }
-  
-      return result.rows;
-    } catch (error) {
-      console.error("❌ Error fetching scheduling history by mentor schedules:", error);
+
+    const result = await pgDatabase.query(query, [mentor_id]);
+    if (!result.rows.length) {
+      console.log("No Schedules found.");
       return [];
     }
+
+    return result.rows;
+  } catch (error) {
+    console.error("❌ Error fetching scheduling history by mentor schedules:", error);
+    return [];
+  }
 };
 
 exports.getPendingSchedulesForMentor = async (mentor_id) => {
-    try {
-      const query = `
+  try {
+    const query = `
         SELECT 
             ms.mentoring_session_id,
             m.mentorship_id, 
@@ -412,38 +411,38 @@ exports.getPendingSchedulesForMentor = async (mentor_id) => {
         ORDER BY ms.mentoring_session_date DESC, ms.start_time DESC;
       `;
 
-      
-      const result = await pgDatabase.query(query, [mentor_id]);
-      if (!result.rows.length) {
-        console.log("No Schedules found.");
-        return [];
-      }
-  
-      return result.rows;
-    } catch (error) {
-      console.error("❌ Error fetching scheduling history by mentor schedules:", error);
+
+    const result = await pgDatabase.query(query, [mentor_id]);
+    if (!result.rows.length) {
+      console.log("No Schedules found.");
       return [];
     }
+
+    return result.rows;
+  } catch (error) {
+    console.error("❌ Error fetching scheduling history by mentor schedules:", error);
+    return [];
+  }
 };
 
 exports.getMentorshipCountByMentorID = async (mentor_id) => {
-    try {
-      const query = `
+  try {
+    const query = `
         SELECT COUNT(DISTINCT se_id) AS mentorship_count
         FROM mentorships
         WHERE mentor_id = $1;
       `;
-      const result = await pgDatabase.query(query, [mentor_id]);
-      if (!result.rows.length) {
-        console.log("No Schedules found.");
-        return [];
-      }
-  
-      return result.rows;
-    } catch (error) {
-      console.error("❌ Error fetching scheduling history by mentor schedules:", error);
+    const result = await pgDatabase.query(query, [mentor_id]);
+    if (!result.rows.length) {
+      console.log("No Schedules found.");
       return [];
     }
+
+    return result.rows;
+  } catch (error) {
+    console.error("❌ Error fetching scheduling history by mentor schedules:", error);
+    return [];
+  }
 };
 
 exports.getProgramCoordinatorsByMentorshipID = async (mentorship_id) => {

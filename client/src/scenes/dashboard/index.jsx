@@ -278,7 +278,7 @@ const Dashboard = ({ }) => {
       });
 
       // ✅ Set success snackbar
-      setSnackbarMessage("Mentorship approved successfully");
+      setSnackbarMessage("Mentorship approved successfully, sent to SE");
       setSnackbarSeverity("success");
       setSnackbarOpen(true);
     } catch (error) {

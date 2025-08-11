@@ -675,7 +675,6 @@ app.get('/api/get-csrf-token', csrfProtection, (req, res) => {
   res.cookie('XSRF-TOKEN', token);
   res.json({ csrfToken: token });
 });
-// SUBA PARTS BELOW
 // DO NOT MODIFY ANYTHING IN THIS API
 app.post("/login", loginLimiter, async (req, res) => {
   const { email, password } = req.body;
@@ -687,35 +686,22 @@ app.post("/login", loginLimiter, async (req, res) => {
           u.first_name,
           u.last_name,
           u.email,
-          u.password, -- We need the password hash for comparison
+          u.password,
           u.isactive,
           ARRAY_AGG(uhr.role_name) AS roles
-      FROM
-          users u
-      LEFT JOIN
-          user_has_roles uhr ON u.user_id = uhr.user_id
-      WHERE
-          u.email = $1
-      GROUP BY
-          u.user_id, u.first_name, u.last_name, u.email, u.password, u.isactive;
+      FROM users u
+      LEFT JOIN user_has_roles uhr ON u.user_id = uhr.user_id
+      WHERE u.email = $1
+      GROUP BY u.user_id, u.first_name, u.last_name, u.email, u.password, u.isactive;
     `;
 
-    // Place the full query string here
-    const result = await pgDatabase.query(
-      query,
-      [email]
-    );
-
+    const result = await pgDatabase.query(query, [email]);
     const user = result.rows[0];
 
-    if (!user) {
-      return res.status(401).json({ message: "Invalid credentials" });
-    }
+    if (!user) return res.status(401).json({ message: "Invalid credentials" });
 
     const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      return res.status(401).json({ message: "Invalid credentials" });
-    }
+    if (!isPasswordValid) return res.status(401).json({ message: "Invalid credentials" });
 
     if (!user.isactive) {
       return res.status(401).json({
@@ -724,12 +710,10 @@ app.post("/login", loginLimiter, async (req, res) => {
       });
     }
 
-    // Clean up the roles array from [null] to []
-    const cleanedRoles = user.roles && user.roles.length > 0 && user.roles[0] !== null
-      ? user.roles
-      : [];
+    const cleanedRoles =
+      user.roles && user.roles.length > 0 && user.roles[0] !== null ? user.roles : [];
 
-    // Store user info in session
+    // 1) Create express-session payload
     req.session.user = {
       id: user.user_id,
       email: user.email,
@@ -740,17 +724,27 @@ app.post("/login", loginLimiter, async (req, res) => {
     };
     req.session.isAuth = true;
 
+    // 2) Create row in public.active_sessions for this login and keep its UUID in-session
+    try {
+      const insertActive = `
+        INSERT INTO active_sessions (user_id)
+        VALUES ($1)
+        RETURNING session_id
+      `;
+      const { rows } = await pgDatabase.query(insertActive, [user.user_id]);
+      req.session.active_session_id = rows[0]?.session_id; // store exact tracker for logout
+    } catch (e) {
+      // Don't block login if tracker insert fails; just log
+      console.error("Failed to insert into active_sessions:", e);
+    }
+
     console.log("Login Session:", req.session);
 
-    // Respond appropriately
-    if (cleanedRoles.includes("Administrator")) { // Use .includes() for array check
+    // Respond appropriately (unchanged)
+    if (cleanedRoles.includes("Administrator")) {
       return res.status(200).json({
         message: "Admin login successful",
-        user: {
-          id: user.user_id,
-          email: user.email,
-          roles: cleanedRoles,
-        },
+        user: { id: user.user_id, email: user.email, roles: cleanedRoles },
         session_id: req.sessionID,
         redirect: "/admin",
       });
@@ -773,39 +767,63 @@ app.post("/login", loginLimiter, async (req, res) => {
     res.status(500).json({ message: "Internal server error" });
   }
 });
+
 // DO NOT MODIFY ANYTHING IN THIS API
 app.post("/logout", (req, res) => {
   console.log("Successfully Logged Out");
 
   const sessionId = req.sessionID;
-
   if (!sessionId) {
     return res.status(400).json({ message: "No session found" });
   }
 
-  // Destroy express-session session
+  // 1) Best-effort delete of active_sessions row tied to this session
+  const activeSessionId = req.session?.active_session_id || null;
+  const userId = req.session?.user?.id || null;
+
+  const cleanupActiveSessions = async () => {
+    try {
+      if (activeSessionId) {
+        await pgDatabase.query(
+          "DELETE FROM active_sessions WHERE session_id = $1",
+          [activeSessionId]
+        );
+      } else if (userId) {
+        // Optional fallback: uncomment to log out ALL sessions for this user
+        // await pgDatabase.query("DELETE FROM active_sessions WHERE user_id = $1", [userId]);
+      }
+    } catch (e) {
+      console.error("Failed to delete from active_sessions:", e);
+      // proceed anyway; session destroy still continues
+    }
+  };
+
+  // 2) Destroy express-session session (removes from public.session)
   req.session.destroy(async (err) => {
     if (err) {
       console.error("Error destroying session:", err);
       return res.status(500).json({ message: "Failed to logout" });
     }
 
+    await cleanupActiveSessions();
+
     try {
-      // Clear session cookie
+      // 3) Clear the express-session cookie
       res.clearCookie("connect.sid", {
-        path: "/", // ensure it matches your cookie config
+        path: "/",            // must match your session cookie config
         httpOnly: true,
-        sameSite: "strict", // or 'lax' if used in production
-        secure: false, // true if using HTTPS in production
+        sameSite: "strict",   // use 'lax' if that’s what you configured
+        secure: false,        // set true in HTTPS prod
       });
 
-      res.status(200).json({ message: "Logout successful" });
+      return res.status(200).json({ message: "Logout successful" });
     } catch (dbErr) {
       console.error("DB Error during logout:", dbErr);
-      res.status(500).json({ message: "Error deleting session from DB" });
+      return res.status(500).json({ message: "Error deleting session from DB" });
     }
   });
 });
+
 // DO NOT MODIFY ANYTHING IN THIS API
 app.post("/apply-as-mentor", async (req, res) => {
   const {
@@ -1193,7 +1211,7 @@ app.post("/signup-lseed-role", async (req, res) => {
     res.status(500).json({ message: "Server error. Please try again." });
   }
 });
-
+// SUBA PARTS BELOW
 app.post("/api/accept-mentor-application", async (req, res) => {
   const { applicationId } = req.body;
   if (!applicationId) return res.status(400).json({ message: "applicationId is required" });
@@ -1853,8 +1871,6 @@ app.get("/api/mentors/:mentorId/social-enterprises", async (req, res) => {
 
 app.post("/api/evaluate", async (req, res) => {
   try {
-    console.log("📥 Received Evaluation Data:", req.body);
-
     let { mentorId, se_id, evaluations, mentoring_session_id } = req.body;
     if (!Array.isArray(se_id)) se_id = [se_id];
 
@@ -2407,7 +2423,7 @@ app.get("/api/get-all-social-enterprises", async (req, res) => {
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
-
+// TODO: EDIT this for reports
 app.get("/api/getAllSocialEnterprisesForComparison", async (req, res) => {
   try {
     const program = req.query.program || null; // Optional program param
@@ -2442,7 +2458,7 @@ app.get("/api/get-mentor-evaluations", async (req, res) => {
   }
 });
 
-app.get("/api/mentorSchedulesByID", async (req, res) => {
+app.get("/api/mentor-schedules-by-id", async (req, res) => {
   try {
     const mentor_id = req.session.user?.id; // Safely extract from session
 
@@ -2601,7 +2617,7 @@ app.get("/api/get-evaluation-details", async (req, res) => {
   }
 });
 
-app.get("/api/check-Telegram-Registration", async (req, res) => {
+app.get("/api/check-telegram-registration", async (req, res) => {
   const { mentor_id, se_id } = req.query;
 
   if (!mentor_id || !se_id) {
@@ -4301,7 +4317,7 @@ app.post("/api/remove-mentorship", async (req, res) => {
   }
 });
 
-app.get("/api/get-Mentorships-by-ID", async (req, res) => {
+app.get("/api/get-mentorships-by-id", async (req, res) => {
   try {
     const { mentor_id } = req.query; // Extract mentor_id from query parameters
 
@@ -6281,7 +6297,7 @@ app.post("/api/decline-mentorship", async (req, res) => {
 // DIEGO PARTS ABOVE check 
 
 // RONALDO PARTS BELOW - DONE  8/4
-app.post("/api/updateMentorshipDate", async (req, res) => {
+app.post("/api/update-mentorship-date", async (req, res) => {
   console.log("🔹 Received request at /updateMentorshipDate");
 
   const {
@@ -6377,7 +6393,7 @@ app.post("/api/updateMentorshipDate", async (req, res) => {
   }
 });
 
-app.get("/api/getMentorshipDates", async (req, res) => {
+app.get("/api/get-mentorship-dates", async (req, res) => {
   const { mentor_id } = req.query;
   // console.log("server/getMentorshipDate: mentor_id: ", mentor_id);
 

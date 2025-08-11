@@ -582,12 +582,6 @@ const EvaluatePage = ({ }) => {
     const getValidRating = (rating) =>
       rating && rating >= 1 && rating <= 5 ? rating : 1;
 
-    if (!userSession || !userSession.id) {
-      console.error("❌ User session not found.");
-      alert("Error: User session not found.");
-      return;
-    }
-
     const selectedSE = socialEnterprises.find((se) => se.id === currentSEId);
     if (!selectedSE) {
       console.error("❌ Selected SE not found.");
@@ -613,10 +607,6 @@ const EvaluatePage = ({ }) => {
       return;
     }
 
-    const sdgIds = Array.isArray(selectedSE.sdg_name)
-      ? selectedSE.sdg_name
-      : [selectedSE.sdg_name];
-
     const isValid = Object.keys(evaluationCriteria).every((category) => {
       const currentSEId = selectedSEs[currentSEIndex];
       const categoryEval = evaluations[currentSEId]?.[category];
@@ -637,11 +627,9 @@ const EvaluatePage = ({ }) => {
     }
 
     const formData = {
-      evaluatorId: userSession.id,
       se_id: se_id,
       mentorId: mentorId,
       evaluations: currentEvaluations,
-      sdg_id: sdgIds,
       mentoring_session_id: mentoring_session_id,
     };
 

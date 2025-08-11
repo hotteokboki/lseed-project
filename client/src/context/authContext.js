@@ -124,7 +124,7 @@ export const AuthContextProvider = ({ children }) => {
   const logout = async () => {
     try {
       // Assuming your backend /logout endpoint handles session invalidation on the server
-      await axios.post(`${process.env.REACT_APP_API_BASE_URL}ttp://localhost:4000/logout`, null, {
+      await axios.post(`${process.env.REACT_APP_API_BASE_URL}/logout`, null, {
         withCredentials: true,
       });
 
