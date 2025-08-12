@@ -207,6 +207,35 @@ router.get("/mentors", async (req, res) => {
   }
 });
 
+// GET /auth/reset-password/validate?token=...
+router.get("/reset-password/validate", async (req, res) => {
+  const { token } = req.query;
+  if (!token) {
+    return res.status(400).json({ message: "Missing token" });
+  }
+
+  try {
+    // Optional: clean up any expired tokens first
+    await pgDatabase.query(`DELETE FROM password_reset_tokens WHERE expires_at <= NOW()`);
+
+    // Validate: token exists and not expired
+    const { rows } = await pgDatabase.query(
+      `SELECT 1 FROM password_reset_tokens WHERE token = $1 AND expires_at > NOW()`,
+      [token]
+    );
+
+    if (rows.length === 0) {
+      return res.status(400).json({ message: "Invalid or expired token" });
+    }
+
+    // Token is good
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("Error validating reset token:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+});
+
 module.exports = {
   router,
   requireAuth,

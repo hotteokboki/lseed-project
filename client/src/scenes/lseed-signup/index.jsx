@@ -9,6 +9,7 @@ import {
     Snackbar,
     Alert,
 } from "@mui/material";
+import Header from "../../components/Header";
 import axiosClient from "../../api/axiosClient";
 
 const LSEEDSignup = () => {
@@ -86,14 +87,19 @@ const LSEEDSignup = () => {
 
     if (!isValidToken) {
         return (
-            <div style={{ padding: "20px", textAlign: "center" }}>
-                <h2>Access Denied</h2>
-                <p>This signup link is invalid or expired.</p>
-                <Button onClick={() => navigate("/")}>Go Home</Button>
-            </div>
+            <Box m="20px" textAlign="center">
+                <Header title="Signup Page Expired" subtitle="Link invalid or expired" />
+                <Box mt={4}>
+                    <Typography variant="h6" sx={{ mb: 2 }}>
+                        This signup link is invalid, expired, or already used.
+                    </Typography>
+                    <Button variant="contained" onClick={() => navigate("/", { replace: true })}>
+                        Go to Home
+                    </Button>
+                </Box>
+            </Box>
         );
     }
-
     const handleFlip = () => {
         setIsFlipped(!isFlipped);
     };

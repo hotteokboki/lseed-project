@@ -7,11 +7,16 @@ import {
   Alert,
   Snackbar,
   useTheme,
+  CircularProgress,
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogActions
 } from "@mui/material";
 import { tokens } from "../../theme";
 import Header from "../../components/Header";
 import { Link } from "react-router-dom";
-import axios from "axios";
+import axiosClient from "../../api/axiosClient";
 
 const ForgotPassword = () => {
   const theme = useTheme();
@@ -21,21 +26,60 @@ const ForgotPassword = () => {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [snackbarOpen, setSnackbarOpen] = useState(false);
+  const [sqOpen, setSqOpen] = useState(false);
+  const [questions, setQuestions] = useState([]);   // [{ position, question }]
+  const [answers, setAnswers] = useState({});       // { [position]: "user answer" }
+  const [submitting, setSubmitting] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setMessage("");
+    setError("");
+    setSubmitting(true);
+
     try {
-      const res = await axios.post(
-        `${process.env.REACT_APP_API_BASE_URL}/auth/forgot-password`,
-        { email }
-      );
-      setMessage(res.data.message);
-      setError("");
+      const { data } = await axiosClient.post("/auth/forgot-password", { email });
+
+      if (data.requiresSecurityQuestions) {
+        setQuestions(data.questions || []); // [{position, question}]
+        setAnswers({});
+        setSqOpen(true);
+      } else {
+        setMessage(data.message || "If that email exists, a reset link was sent.");
+        setSnackbarOpen(true);
+      }
+    } catch (err) {
+      setError(err?.response?.data?.message || "Something went wrong.");
+      setSnackbarOpen(true);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSubmitSq = async () => {
+    setSubmitting(true);
+    setMessage("");
+    setError("");
+
+    try {
+      const payload = {
+        email,
+        answers: questions.map(q => ({
+          position: q.position,
+          answer: (answers[q.position] || "").trim(),
+        })),
+      };
+
+      const { data } = await axiosClient.post("/auth/forgot-password", payload);
+
+      setSqOpen(false);
+      setMessage(data.message || "Reset link sent. Please check your email.");
       setSnackbarOpen(true);
     } catch (err) {
-      setError(err.response?.data?.message || "Something went wrong.");
-      setMessage("");
+      setError(err?.response?.data?.message || "Answers did not match. Please try again.");
       setSnackbarOpen(true);
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -101,6 +145,8 @@ const ForgotPassword = () => {
               type="submit"
               variant="contained"
               fullWidth
+              disabled={submitting}
+              startIcon={submitting ? <CircularProgress size={18} /> : null}
               sx={{
                 backgroundColor: "#1E4D2B",
                 color: "#fff",
@@ -108,7 +154,7 @@ const ForgotPassword = () => {
                 "&:hover": { backgroundColor: "#145A32" },
               }}
             >
-              Send Reset Link
+              {submitting ? "Please wait..." : "Send Reset Link"}
             </Button>
           </form>
 
@@ -147,6 +193,43 @@ const ForgotPassword = () => {
           </Alert>
         ) : null}
       </Snackbar>
+
+      <Dialog open={sqOpen} onClose={() => setSqOpen(false)} className="custom-dialog">
+        <DialogTitle className="custom-dialog-title">Security Verification</DialogTitle>
+        <DialogContent className="custom-dialog-content">
+          <Typography variant="body1" sx={{ color: "#000", mb: 2 }}>
+            Please answer your security questions to continue.
+          </Typography>
+
+          {questions.map((q) => (
+            <TextField
+              key={q.position}
+              fullWidth
+              label={q.question}
+              value={answers[q.position] || ""}
+              onChange={(e) =>
+                setAnswers(prev => ({ ...prev, [q.position]: e.target.value }))
+              }
+              margin="dense"
+              InputProps={{ style: { color: "#000" } }}
+              InputLabelProps={{ style: { color: "#000" } }}
+              sx={{
+                "& .MuiOutlinedInput-root": {
+                  "& fieldset": { borderColor: "#000" },
+                  "&:hover fieldset": { borderColor: "#000" },
+                  "&.Mui-focused fieldset": { borderColor: "#000" },
+                },
+              }}
+            />
+          ))}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSqOpen(false)} disabled={submitting}>Cancel</Button>
+          <Button onClick={handleSubmitSq} variant="contained" disabled={submitting}>
+            {submitting ? "Submitting..." : "Submit"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

@@ -22,6 +22,7 @@ import {
   Box,
   Chip,
 } from "@mui/material";
+import axiosClient from "../../api/axiosClient";
 
 const Login = () => {
   const { login } = useAuth();
@@ -30,7 +31,10 @@ const Login = () => {
   const [password, setPassword] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [passwordStrength, setPasswordStrength] = useState("");
-  const [passwordsMatch, setPasswordsMatch] = useState(true);
+  const [otpOpen, setOtpOpen] = useState(false);
+  const [otp, setOtp] = useState("");
+  const [otpError, setOtpError] = useState("");
+  const [verifyingOtp, setVerifyingOtp] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [passwordChecklist, setPasswordChecklist] = useState({
     length: false,
@@ -107,7 +111,7 @@ const Login = () => {
     e.stopPropagation();
     setMenuOpenPreferredTime(false);
   };
-  
+
   const startRetryCountdown = (seconds) => {
     setRetrySeconds(seconds);
 
@@ -120,7 +124,7 @@ const Login = () => {
         if (prev <= 1) {
           clearInterval(retryTimerRef.current);
           retryTimerRef.current = null;
-          setErrorMessage(""); 
+          setErrorMessage("");
           return null;
         }
         return prev - 1;
@@ -151,29 +155,25 @@ const Login = () => {
     setErrorMessage("");
 
     try {
-      const response = await fetch(
-        `${process.env.REACT_APP_API_BASE_URL}/login`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          credentials: "include",
-          body: JSON.stringify({
-            email,
-            password,
-          }),
-        }
-      );
+      const response = await fetch(`${process.env.REACT_APP_API_BASE_URL}/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ email, password }),
+      });
 
       let data = {};
-      try {
-        data = await response.json();
-      } catch (parseError) {
-        console.warn("Failed to parse JSON response:", parseError);
-      }
+      try { data = await response.json(); } catch { }
 
       if (response.ok) {
+        if (data.require2fa) {
+          // show OTP modal
+          setOtp("");
+          setOtpError("");
+          setOtpOpen(true);
+          return;
+        }
+        // normal (no 2FA)
         login(data.user);
         window.location.href = data.redirect || "/dashboard";
       } else {
@@ -185,9 +185,45 @@ const Login = () => {
         }
       }
     } catch (error) {
-      console.error("Network or server error:", error);
       setErrorMessage("A network error occurred. Please try again.");
     }
+  };
+
+  const handleVerifyOtp = async () => {
+    setOtpError("");
+    if (otp.length !== 6) {
+      setOtpError("Enter the 6-digit code.");
+      return;
+    }
+
+    try {
+      setVerifyingOtp(true);
+
+      // If your axiosClient doesn't already set withCredentials, add it in the third arg.
+      const { data } = await axiosClient.post(
+        "/login/2fa-verify",
+        { code: otp } // payload
+        // , { withCredentials: true }
+      );
+
+      if (data?.ok) {
+        if (data.user) login(data.user);
+        setOtpOpen(false);
+        window.location.href = data.redirect || "/dashboard";
+      } else {
+        setOtpError(data?.message || "Invalid code. Please try again.");
+      }
+    } catch (e) {
+      setOtpError(e?.response?.data?.message || "Could not verify code. Please try again.");
+    } finally {
+      setVerifyingOtp(false);
+    }
+  };
+
+  const handleCancelOtp = () => {
+    setOtp("");
+    setOtpError("");
+    setOtpOpen(false);
   };
 
   const handleInputChange = (e) => {
@@ -212,7 +248,7 @@ const Login = () => {
   };
 
   const getPasswordStrength = (password) => {
-    if (password.length < 6) return "Weak";
+    if (password.length <= 7) return "Weak";
     if (
       /[A-Z]/.test(password) &&
       /[0-9]/.test(password) &&
@@ -235,17 +271,17 @@ const Login = () => {
 
     // ✅ Check for weak password
     if (
-        !passwordChecklist.length ||
-        !passwordChecklist.uppercase ||
-        !passwordChecklist.number ||
-        !passwordChecklist.specialChar
+      !passwordChecklist.length ||
+      !passwordChecklist.uppercase ||
+      !passwordChecklist.number ||
+      !passwordChecklist.specialChar
     ) {
-        setSnackbarMessage(
+      setSnackbarMessage(
         "Password is too weak. Please follow the required rules."
-        );
-        setSnackbarSeverity("error");
-        setSnackbarOpen(true);
-        return;
+      );
+      setSnackbarSeverity("error");
+      setSnackbarOpen(true);
+      return;
     }
 
     // Validate password match
@@ -342,7 +378,7 @@ const Login = () => {
                   </div>
                   <div className="input-box">
                     <i className="fas fa-lock"></i>
-                    
+
                     <input
                       type={showPassword ? "text" : "password"}
                       name="password"
@@ -351,7 +387,7 @@ const Login = () => {
                       onChange={(e) => setPassword(e.target.value)}
                       required
                     />
-                    
+
                     <button
                       type="button"
                       onClick={() => setShowPassword(!showPassword)}
@@ -478,7 +514,7 @@ const Login = () => {
                       }
                       helperText={
                         hasSubmitted &&
-                        formData.password !== formData.confirmPassword
+                          formData.password !== formData.confirmPassword
                           ? "Passwords do not match"
                           : ""
                       }
@@ -839,6 +875,56 @@ const Login = () => {
           )}
         </div>
       </div>
+
+      <Dialog open={otpOpen} onClose={handleCancelOtp} className="custom-dialog">
+        <DialogTitle className="custom-dialog-title">
+          Two-Factor Authentication
+        </DialogTitle>
+
+        <DialogContent className="custom-dialog-content">
+          <Typography variant="body1" sx={{ mb: 1, color: "#000" }}>
+            Enter the 6-digit code from your authenticator app.
+          </Typography>
+
+          <TextField
+            autoFocus
+            fullWidth
+            label="6-digit code"
+            value={otp}
+            onChange={(e) =>
+              setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))
+            }
+            inputProps={{ inputMode: "numeric", pattern: "[0-9]*", maxLength: 6 }}
+            error={!!otpError}
+            helperText={otpError || " "}
+            InputProps={{ style: { color: "#000" } }}
+            InputLabelProps={{ style: { color: "#000" } }}
+            sx={{
+              mt: 2,
+              "& .MuiOutlinedInput-root": {
+                "& fieldset": { borderColor: "#000" },
+                "&:hover fieldset": { borderColor: "#000" },
+                "&.Mui-focused fieldset": { borderColor: "#000" },
+              },
+            }}
+          />
+        </DialogContent>
+
+        <DialogActions>
+          <Button onClick={handleCancelOtp} disabled={verifyingOtp}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleVerifyOtp}
+            disabled={verifyingOtp || otp.length !== 6}
+            variant="contained"
+            color="primary"
+          >
+            {verifyingOtp ? "Verifying..." : "Verify"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog
         open={openDialog}
         onClose={() => setOpenDialog(false)}

@@ -2,6 +2,7 @@ const express = require("express");
 const session = require("express-session");
 const { v4: uuidv4 } = require('uuid');
 const cors = require("cors");
+const speakeasy = require("speakeasy"); // add at top with other requires
 const nodemailer = require('nodemailer');
 const bcrypt = require('bcrypt'); // For password hashing
 const cron = require('node-cron'); // For automating password changing
@@ -34,6 +35,7 @@ const pgSession = require("connect-pg-simple")(session);
 const cookieParser = require("cookie-parser");
 const { addProgram } = require("./controllers/programsController");
 const profileRoutes = require("./routes/profileRoutes.js");
+const securityRoutes = require("./routes/securityRoutes");
 const PDFDocument = require("pdfkit");
 const csrf = require('csurf');
 const helmet = require('helmet');
@@ -173,6 +175,12 @@ const loginLimiter = rateLimit({
   }
 });
 
+const otpLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 5,
+  message: { message: "Too many OTP attempts. Try again in a minute." },
+});
+
 // const apiLimiter = rateLimit({
 //   windowMs: 1 * 60 * 1000, // 1 minute
 //   max: 100, // 100 requests per IP
@@ -232,6 +240,7 @@ app.use("/api/inventory-distribution", inventoryRoutes);
 app.use("/auth", authRoutes);
 app.use("/api/mentorships", mentorshipRoutes);
 app.use("/api/profile", requireAuth, profileRoutes);
+app.use("/api/security", requireAuth, securityRoutes);
 
 app.post("/api/import/:reportType", async (req, res) => {
   const { reportType } = req.params;
@@ -400,6 +409,73 @@ async function sendMessage(chatId, message) {
     throw new Error(`Failed to send message: ${error.message}`);
   }
 }
+
+async function startFullSession(req, user) {
+  // user = { user_id, email, roles, first_name, last_name }
+  req.session.user = {
+    id: user.user_id,
+    email: user.email,
+    roles: user.roles || [],
+    firstName: user.first_name,
+    lastName: user.last_name,
+    activeRole: (user.roles || [])[0],
+  };
+  req.session.isAuth = true;
+
+  try {
+    const insertActive = `
+      INSERT INTO active_sessions (user_id)
+      VALUES ($1)
+      RETURNING session_id
+    `;
+    const { rows } = await pgDatabase.query(insertActive, [user.user_id]);
+    req.session.active_session_id = rows[0]?.session_id;
+  } catch (e) {
+    console.error("Failed to insert into active_sessions:", e);
+  }
+}
+
+async function finalizeLogin(req, user, cleanedRoles) {
+  // create session payload
+  req.session.user = {
+    id: user.user_id,
+    email: user.email,
+    roles: cleanedRoles,
+    firstName: user.first_name,
+    lastName: user.last_name,
+    activeRole: cleanedRoles[0],
+  };
+  req.session.isAuth = true;
+
+  // track active session (non-blocking if it fails)
+  try {
+    const insertActive = `
+      INSERT INTO active_sessions (user_id)
+      VALUES ($1)
+      RETURNING session_id
+    `;
+    const { rows } = await pgDatabase.query(insertActive, [user.user_id]);
+    req.session.active_session_id = rows[0]?.session_id;
+  } catch (e) {
+    console.error("Failed to insert into active_sessions:", e);
+  }
+
+  const isAdmin = cleanedRoles.includes("Administrator");
+  return {
+    ok: true,
+    message: isAdmin ? "Admin login successful" : "User login successful",
+    user: {
+      id: user.user_id,
+      email: user.email,
+      roles: cleanedRoles,
+      firstName: user.first_name,
+      lastName: user.last_name,
+    },
+    session_id: req.sessionID,
+    redirect: isAdmin ? "/admin" : "/dashboard",
+  };
+}
+
 
 function extractEmailFromContactnum(contactnum) {
   if (!contactnum) return "";
@@ -805,6 +881,9 @@ app.post("/login", loginLimiter, async (req, res) => {
   const { email, password } = req.body;
 
   try {
+    // clear any stale pending 2FA from previous attempts
+    delete req.session.pending_2fa_user;
+
     const query = `
       SELECT
           u.user_id,
@@ -822,7 +901,6 @@ app.post("/login", loginLimiter, async (req, res) => {
 
     const result = await pgDatabase.query(query, [email]);
     const user = result.rows[0];
-
     if (!user) return res.status(401).json({ message: "Invalid credentials" });
 
     const isPasswordValid = await bcrypt.compare(password, user.password);
@@ -838,44 +916,64 @@ app.post("/login", loginLimiter, async (req, res) => {
     const cleanedRoles =
       user.roles && user.roles.length > 0 && user.roles[0] !== null ? user.roles : [];
 
-    // 1) Create express-session payload
-    req.session.user = {
-      id: user.user_id,
-      email: user.email,
-      roles: cleanedRoles,
-      firstName: user.first_name,
-      lastName: user.last_name,
-      activeRole: user.roles[0],
-    };
-    req.session.isAuth = true;
+    // ——— 2FA check ———
+    const twofaQ = await pgDatabase.query(
+      `SELECT enabled FROM user_twofa WHERE user_id = $1`,
+      [user.user_id]
+    );
+    const twofaEnabled = !!twofaQ.rows[0]?.enabled;
 
-    // 2) Create row in public.active_sessions for this login and keep its UUID in-session
-    try {
-      const insertActive = `
-        INSERT INTO active_sessions (user_id)
-        VALUES ($1)
-        RETURNING session_id
-      `;
-      const { rows } = await pgDatabase.query(insertActive, [user.user_id]);
-      req.session.active_session_id = rows[0]?.session_id; // store exact tracker for logout
-    } catch (e) {
-      // Don't block login if tracker insert fails; just log
-      console.error("Failed to insert into active_sessions:", e);
+    if (twofaEnabled) {
+      // Stage 1: password OK, require OTP next
+      req.session.pending_2fa_user = {
+        user_id: user.user_id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        roles: cleanedRoles,
+      };
+      // Do NOT set isAuth yet
+      return res.status(200).json({
+        require2fa: true,
+        message: "Two-factor authentication required.",
+      });
     }
 
-    console.log("Login Session:", req.session);
+    // No 2FA → finalize login
+    // (optional but recommended: regenerate session to prevent fixation)
+    req.session.regenerate(async (err) => {
+      if (err) {
+        console.error("Session regenerate failed:", err);
+        return res.status(500).json({ message: "Internal server error" });
+      }
 
-    // Respond appropriately (unchanged)
-    if (cleanedRoles.includes("Administrator")) {
+      // same payload your finalizeLogin helper would set
+      req.session.user = {
+        id: user.user_id,
+        email: user.email,
+        roles: cleanedRoles,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        activeRole: cleanedRoles[0],
+      };
+      req.session.isAuth = true;
+
+      // best-effort tracker
+      try {
+        const insertActive = `
+          INSERT INTO active_sessions (user_id)
+          VALUES ($1)
+          RETURNING session_id
+        `;
+        const { rows } = await pgDatabase.query(insertActive, [user.user_id]);
+        req.session.active_session_id = rows[0]?.session_id;
+      } catch (e) {
+        console.error("Failed to insert into active_sessions:", e);
+      }
+
+      const isAdmin = cleanedRoles.includes("Administrator");
       return res.status(200).json({
-        message: "Admin login successful",
-        user: { id: user.user_id, email: user.email, roles: cleanedRoles },
-        session_id: req.sessionID,
-        redirect: "/admin",
-      });
-    } else {
-      return res.status(200).json({
-        message: "User login successful",
+        message: isAdmin ? "Admin login successful" : "User login successful",
         user: {
           id: user.user_id,
           email: user.email,
@@ -884,11 +982,64 @@ app.post("/login", loginLimiter, async (req, res) => {
           lastName: user.last_name,
         },
         session_id: req.sessionID,
-        redirect: "/dashboard",
+        redirect: isAdmin ? "/admin" : "/dashboard",
       });
-    }
+    });
   } catch (error) {
     console.error("Login Error:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+app.post("/login/2fa-verify", otpLimiter, async (req, res) => {
+  try {
+    const { code } = req.body || {};
+    const pending = req.session.pending_2fa_user;
+
+    if (!pending) {
+      return res.status(400).json({ message: "No 2FA login in progress." });
+    }
+    if (!code || String(code).trim().length !== 6) {
+      return res.status(400).json({ message: "Enter the 6-digit code." });
+    }
+
+    // get the user's 2FA secret
+    const q = await pgDatabase.query(
+      `SELECT secret_base32 FROM user_twofa WHERE user_id = $1 AND enabled = true`,
+      [pending.user_id]
+    );
+    const secret = q.rows[0]?.secret_base32;
+    if (!secret) {
+      return res.status(400).json({ message: "2FA is not enabled for this account." });
+    }
+
+    // verify TOTP (allow slight clock drift with window=1)
+    const ok = speakeasy.totp.verify({
+      secret,
+      encoding: "base32",
+      token: String(code),
+      window: 1,
+    });
+
+    if (!ok) {
+      return res.status(400).json({ message: "Invalid or expired code. Please try again." });
+    }
+
+    // finish login
+    const user = {
+      user_id: pending.user_id,
+      email: pending.email,
+      first_name: pending.first_name,
+      last_name: pending.last_name,
+    };
+    const payload = await finalizeLogin(req, user, pending.roles);
+
+    // clear the pending marker
+    delete req.session.pending_2fa_user;
+
+    return res.status(200).json(payload);
+  } catch (err) {
+    console.error("POST /login/2fa-verify", err);
     res.status(500).json({ message: "Internal server error" });
   }
 });
@@ -1729,7 +1880,7 @@ app.post("/api/invite-lseed-user", async (req, res) => {
     return res.status(201).json({ message: "Invitation email sent successfully." });
   } catch (err) {
     // rollback if needed
-    try { await pgDatabase.query("ROLLBACK"); } catch {}
+    try { await pgDatabase.query("ROLLBACK"); } catch { }
     console.error("❌ Error inviting user:", err);
     return res.status(500).json({ message: "Something went wrong." });
   }
