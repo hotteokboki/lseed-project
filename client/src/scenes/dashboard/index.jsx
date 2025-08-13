@@ -20,7 +20,7 @@ import { useAuth } from "../../context/authContext";
 import SchoolIcon from "@mui/icons-material/School";
 import AcknowledgmentChart from "../../components/AcknowledgmentChart";
 import Header from "../../components/Header";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import SEPerformanceTrendChart from "../../components/SEPerformanceTrendChart";
 import StatBox from "../../components/StatBox";
 import { useState, useEffect, useContext } from "react";
@@ -46,6 +46,9 @@ const Dashboard = ({ }) => {
   const colors = tokens(theme.palette.mode);
   const { user, isMentorView, toggleView, loading: authLoading } = useAuth();
   const [currentEvents, setCurrentEvents] = useState([]);
+  const location = useLocation();
+  const loginSessionId = location.state?.loginSessionId; // from navigate()
+  const lastUseFromLogin = location.state?.lastUse; // <-- ADD
   const [lowPerformingSEs, setLowPerformingSEs] = useState([]);
   const [mentorSchedules, setMentorSchedules] = useState([]);
   const [socialEnterprises, setSocialEnterprises] = useState([]);
@@ -61,6 +64,8 @@ const Dashboard = ({ }) => {
   const [openDialog, setOpenDialog] = useState(false);
   const navigate = useNavigate();
   const [mentorDashboardStats, setMentorDashboardStats] = useState(null);
+  const [lastUseOpen, setLastUseOpen] = useState(false);
+  const [lastUseText, setLastUseText] = useState("");
   const [stats, setStats] = useState({
     mentorWithoutMentorshipCount: [{ count: "0" }], // Default structure to prevent undefined errors
     mentorWithMentorshipCount: [{ count: "0" }],
@@ -107,6 +112,48 @@ const Dashboard = ({ }) => {
     }
   }, [user]);
 
+  useEffect(() => {
+    if (authLoading || !user || !loginSessionId) return;
+
+    const ONE_TIME_KEY = `lastUseShown:${loginSessionId}`;
+    if (sessionStorage.getItem(ONE_TIME_KEY) === "1") return;
+
+    const fmt = (a) => {
+      if (!a) return null;
+      const status = a.success ? "Successful" : (a.twofa_pending ? "2FA required" : "Failed");
+      const when = new Date(a.attempted_at).toLocaleString();
+      const ip = a.ip || "Unknown IP";
+      return `Last account use: ${when} from ${ip} (${status})`;
+    };
+
+    // 1️⃣ Prefer value from login state
+    if (lastUseFromLogin) {
+      const text = fmt(lastUseFromLogin);
+      if (text) {
+        setLastUseText(text);
+        setLastUseOpen(true);
+        sessionStorage.setItem(ONE_TIME_KEY, "1");
+        return;
+      }
+    }
+
+    // 2️⃣ Fallback to API if no login state
+    (async () => {
+      try {
+        const { data } = await axiosClient.get("/api/last-use");
+        if (data?.lastUse) {
+          setLastUseText(fmt(data.lastUse));
+        } else {
+          setLastUseText("This looks like your first activity on this device.");
+        }
+      } catch {
+        setLastUseText("Security notice: couldn’t fetch your last account use.");
+      }
+      setLastUseOpen(true);
+      sessionStorage.setItem(ONE_TIME_KEY, "1");
+    })();
+
+  }, [authLoading, user, loginSessionId, lastUseFromLogin]);
 
   const alertColumns = [
     { field: "seName", headerName: "SE Name", flex: 2 },
@@ -1762,6 +1809,18 @@ const Dashboard = ({ }) => {
           sx={{ width: "100%" }}
         >
           {snackbarMessage}
+        </Alert>
+      </Snackbar>
+
+      {/* Security notice: Last account use */}
+      <Snackbar
+        open={lastUseOpen}
+        autoHideDuration={8000}
+        onClose={() => setLastUseOpen(false)}
+        anchorOrigin={{ vertical: "top", horizontal: "center" }}
+      >
+        <Alert onClose={() => setLastUseOpen(false)} severity="info" variant="filled" sx={{ width: "100%" }}>
+          {lastUseText}
         </Alert>
       </Snackbar>
     </Box>

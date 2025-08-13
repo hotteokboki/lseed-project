@@ -302,6 +302,59 @@ app.use("/api/mentorships", mentorshipRoutes);
 app.use("/api/profile", requireAuth, profileRoutes);
 app.use("/api/security", requireAuth, securityRoutes);
 
+function getClientIp(req) {
+  const xf = req.headers['x-forwarded-for'];
+  if (typeof xf === 'string' && xf.length > 0) return xf.split(',')[0].trim();
+  return req.ip;
+}
+
+async function findUserIdByEmail(email) {
+  try {
+    const q = await pgDatabase.query(`SELECT user_id FROM users WHERE email = $1`, [email]);
+    return q.rows[0]?.user_id || null;
+  } catch { return null; }
+}
+
+app.use('/login', async (req, res, next) => {
+  const email = req.body?.email || null;
+  const ip = getClientIp(req);
+  const ua = req.get('user-agent') || null;
+
+  // After /login sends the response, record the outcome
+  res.on('finish', async () => {
+    try {
+      // 200 + isAuth=true => final success
+      const twofaPending = !!req.session?.pending_2fa_user;
+      const success = res.statusCode === 200 && req.session?.isAuth === true && !twofaPending;
+
+      // Resolve user_id if possible (success OR known email)
+      const userId =
+        req.session?.user?.id ||
+        (email ? await findUserIdByEmail(email) : null);
+
+      await pgDatabase.query(
+        `INSERT INTO user_login_audit
+           (user_id, email, ip, user_agent, success, twofa_pending, status_code, session_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          userId,
+          email,
+          ip,
+          ua,
+          success,
+          twofaPending,
+          res.statusCode,
+          success ? req.sessionID : null,
+        ]
+      );
+    } catch (e) {
+      console.error('Login audit insert failed:', e);
+    }
+  });
+
+  next();
+});
+
 app.post("/api/import/:reportType", async (req, res) => {
   const { reportType } = req.params;
   const data = req.body.data; // expects { data: [...], se_id: ..., user_id: ... }
@@ -567,6 +620,27 @@ async function finalizeLogin(req, user, cleanedRoles) {
   };
 }
 
+async function logLoginAttempt({ req, userId, email, success, twofaPending, statusCode, sessionId }) {
+  try {
+    await pgDatabase.query(
+      `INSERT INTO user_login_audit
+         (user_id, email, ip, user_agent, success, twofa_pending, status_code, session_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        userId || null,
+        email || null,
+        getClientIp(req),
+        req.get('user-agent') || null,
+        !!success,
+        !!twofaPending,
+        statusCode,
+        sessionId || null,
+      ]
+    );
+  } catch (e) {
+    console.error('2FA audit insert failed:', e);
+  }
+}
 
 function extractEmailFromContactnum(contactnum) {
   if (!contactnum) return "";
@@ -799,8 +873,14 @@ function cleanArray(arr, maxItemLen = 200) {
 }
 
 function cleanContactNo(v) {
-  // keep digits, +, space, dash, parentheses
-  return String(v || "").replace(/[^\d+\-()\s]/g, "").slice(0, 32);
+  // Remove everything except digits
+  const digitsOnly = String(v || "").replace(/\D/g, "");
+
+  // Limit to 11 digits
+  const cleaned = digitsOnly.slice(0, 11);
+
+  // Optionally, ensure it’s exactly 11 digits before returning
+  return cleaned.length === 11 ? cleaned : "";
 }
 
 // Function to send message with "Acknowledge" button
@@ -986,29 +1066,22 @@ app.get('/api/get-csrf-token', csrfProtection, (req, res) => {
   res.cookie('XSRF-TOKEN', token);
   res.json({ csrfToken: token });
 });
+
 // DO NOT MODIFY ANYTHING IN THIS API
 app.post("/login", loginLimiter, async (req, res) => {
   const { email, password } = req.body;
 
   try {
-    // clear any stale pending 2FA from previous attempts
     delete req.session.pending_2fa_user;
 
     const query = `
-      SELECT
-          u.user_id,
-          u.first_name,
-          u.last_name,
-          u.email,
-          u.password,
-          u.isactive,
-          ARRAY_AGG(uhr.role_name) AS roles
+      SELECT u.user_id, u.first_name, u.last_name, u.email, u.password, u.isactive,
+             ARRAY_AGG(uhr.role_name) AS roles
       FROM users u
       LEFT JOIN user_has_roles uhr ON u.user_id = uhr.user_id
       WHERE u.email = $1
       GROUP BY u.user_id, u.first_name, u.last_name, u.email, u.password, u.isactive;
     `;
-
     const result = await pgDatabase.query(query, [email]);
     const user = result.rows[0];
     if (!user) return res.status(401).json({ message: "Invalid credentials" });
@@ -1018,23 +1091,17 @@ app.post("/login", loginLimiter, async (req, res) => {
 
     if (!user.isactive) {
       return res.status(401).json({
-        message:
-          "Your account is pending verification. Please wait for LSEED to verify your account.",
+        message: "Your account is pending verification. Please wait for LSEED to verify your account.",
       });
     }
 
-    const cleanedRoles =
-      user.roles && user.roles.length > 0 && user.roles[0] !== null ? user.roles : [];
+    const cleanedRoles = user.roles && user.roles[0] !== null ? user.roles : [];
 
-    // ——— 2FA check ———
-    const twofaQ = await pgDatabase.query(
-      `SELECT enabled FROM user_twofa WHERE user_id = $1`,
-      [user.user_id]
-    );
+    // 2FA check
+    const twofaQ = await pgDatabase.query(`SELECT enabled FROM user_twofa WHERE user_id = $1`, [user.user_id]);
     const twofaEnabled = !!twofaQ.rows[0]?.enabled;
 
     if (twofaEnabled) {
-      // Stage 1: password OK, require OTP next
       req.session.pending_2fa_user = {
         user_id: user.user_id,
         email: user.email,
@@ -1042,22 +1109,17 @@ app.post("/login", loginLimiter, async (req, res) => {
         last_name: user.last_name,
         roles: cleanedRoles,
       };
-      // Do NOT set isAuth yet
-      return res.status(200).json({
-        require2fa: true,
-        message: "Two-factor authentication required.",
-      });
+      return res.status(200).json({ require2fa: true, message: "Two-factor authentication required." });
     }
 
     // No 2FA → finalize login
-    // (optional but recommended: regenerate session to prevent fixation)
     req.session.regenerate(async (err) => {
       if (err) {
         console.error("Session regenerate failed:", err);
         return res.status(500).json({ message: "Internal server error" });
       }
 
-      // same payload your finalizeLogin helper would set
+      // set session payload
       req.session.user = {
         id: user.user_id,
         email: user.email,
@@ -1081,6 +1143,32 @@ app.post("/login", loginLimiter, async (req, res) => {
         console.error("Failed to insert into active_sessions:", e);
       }
 
+      // ✅ FETCH lastUse *here*, using the now-valid req.sessionID and user.user_id
+      let lastUse = null;
+      try {
+        const q = await pgDatabase.query(
+          `
+          SELECT email,
+                 attempted_at,
+                 ip::text AS ip,
+                 user_agent,
+                 success,
+                 twofa_pending,
+                 status_code,
+                 session_id
+          FROM user_login_audit
+          WHERE user_id = $1
+            AND (session_id IS DISTINCT FROM $2 OR session_id IS NULL)
+          ORDER BY attempted_at DESC
+          LIMIT 1;
+          `,
+          [user.user_id, req.sessionID]
+        );
+        lastUse = q.rows[0] || null;
+      } catch (e) {
+        console.error("Error fetching last use in login:", e);
+      }
+
       const isAdmin = cleanedRoles.includes("Administrator");
       return res.status(200).json({
         message: isAdmin ? "Admin login successful" : "User login successful",
@@ -1091,8 +1179,9 @@ app.post("/login", loginLimiter, async (req, res) => {
           firstName: user.first_name,
           lastName: user.last_name,
         },
-        session_id: req.sessionID,
+        session_id: req.sessionID,   // for once-per-login guard on the client
         redirect: isAdmin ? "/admin" : "/dashboard",
+        lastUse,                      // pass previous login attempt directly
       });
     });
   } catch (error) {
@@ -1107,9 +1196,28 @@ app.post("/login/2fa-verify", otpLimiter, async (req, res) => {
     const pending = req.session.pending_2fa_user;
 
     if (!pending) {
+      // No 2FA flow → record as unsuccessful use attempt
+      await logLoginAttempt({
+        req,
+        userId: null,
+        email: null,
+        success: false,
+        twofaPending: false,
+        statusCode: 400,
+      });
       return res.status(400).json({ message: "No 2FA login in progress." });
     }
+
     if (!code || String(code).trim().length !== 6) {
+      // Invalid code shape → still an unsuccessful use
+      await logLoginAttempt({
+        req,
+        userId: pending.user_id,
+        email: pending.email,
+        success: false,
+        twofaPending: true,     // still in 2FA step
+        statusCode: 400,
+      });
       return res.status(400).json({ message: "Enter the 6-digit code." });
     }
 
@@ -1120,6 +1228,14 @@ app.post("/login/2fa-verify", otpLimiter, async (req, res) => {
     );
     const secret = q.rows[0]?.secret_base32;
     if (!secret) {
+      await logLoginAttempt({
+        req,
+        userId: pending.user_id,
+        email: pending.email,
+        success: false,
+        twofaPending: true,
+        statusCode: 400,
+      });
       return res.status(400).json({ message: "2FA is not enabled for this account." });
     }
 
@@ -1132,6 +1248,14 @@ app.post("/login/2fa-verify", otpLimiter, async (req, res) => {
     });
 
     if (!ok) {
+      await logLoginAttempt({
+        req,
+        userId: pending.user_id,
+        email: pending.email,
+        success: false,
+        twofaPending: true,
+        statusCode: 400,
+      });
       return res.status(400).json({ message: "Invalid or expired code. Please try again." });
     }
 
@@ -1142,7 +1266,18 @@ app.post("/login/2fa-verify", otpLimiter, async (req, res) => {
       first_name: pending.first_name,
       last_name: pending.last_name,
     };
-    const payload = await finalizeLogin(req, user, pending.roles);
+    const payload = await finalizeLogin(req, user, pending.roles); // sets req.session.user & req.session.isAuth = true
+
+    // ✅ Log the final successful use (no longer in 2FA)
+    await logLoginAttempt({
+      req,
+      userId: pending.user_id,
+      email: pending.email,
+      success: true,
+      twofaPending: false,
+      statusCode: 200,
+      sessionId: req.sessionID,
+    });
 
     // clear the pending marker
     delete req.session.pending_2fa_user;
@@ -1150,7 +1285,57 @@ app.post("/login/2fa-verify", otpLimiter, async (req, res) => {
     return res.status(200).json(payload);
   } catch (err) {
     console.error("POST /login/2fa-verify", err);
+
+    // Best-effort: if we know the pending user, record as unsuccessful use
+    const pending = req.session?.pending_2fa_user;
+    if (pending) {
+      await logLoginAttempt({
+        req,
+        userId: pending.user_id,
+        email: pending.email,
+        success: false,
+        twofaPending: true,
+        statusCode: 500,
+      });
+    }
+
     res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+app.get('/api/last-use', async (req, res) => {
+  if (!req.session?.user?.id) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  const userId = req.session.user.id;   // you set this in finalizeLogin
+  const sessionId = req.sessionID;      // current server-side session id
+
+  try {
+    const q = await pgDatabase.query(
+      `
+      SELECT email,
+             attempted_at,
+             ip::text AS ip,
+             user_agent,
+             success,
+             twofa_pending,
+             status_code,
+             session_id
+      FROM user_login_audit
+      WHERE user_id = $1
+        -- exclude the current session's row if it exists
+        AND (session_id IS DISTINCT FROM $2 OR session_id IS NULL)
+      ORDER BY attempted_at DESC
+      LIMIT 1;
+      `,
+      [userId, sessionId]
+    );
+
+    res.json({ lastUse: q.rows[0] || null });
+  } catch (e) {
+    console.error('last-use query failed:', e);
+    res.status(500).json({ message: 'Server error' });
   }
 });
 

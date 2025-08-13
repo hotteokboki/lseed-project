@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import "../../styles/Login.css";
 import { useAuth } from "../../context/authContext";
 import {
@@ -29,6 +29,7 @@ const Login = () => {
   const [isFlipped, setIsFlipped] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const navigate = useNavigate();
   const [errorMessage, setErrorMessage] = useState("");
   const [passwordStrength, setPasswordStrength] = useState("");
   const [otpOpen, setOtpOpen] = useState(false);
@@ -182,9 +183,15 @@ const Login = () => {
           setOtpOpen(true);
           return;
         }
-        // normal (no 2FA)
+        // normal (no 2FA) — pass session_id + lastUse via state
         login(data.user);
-        window.location.href = data.redirect || "/dashboard";
+        navigate(data.redirect || "/dashboard", {
+          replace: true,
+          state: {
+            loginSessionId: data.session_id,
+            lastUse: data.lastUse,
+          },
+        });
       } else {
         if (response.status === 429 && data.retryAfter) {
           setErrorMessage(data.message || "Too many login attempts.");
@@ -218,7 +225,13 @@ const Login = () => {
       if (data?.ok) {
         if (data.user) login(data.user);
         setOtpOpen(false);
-        window.location.href = data.redirect || "/dashboard";
+        navigate(data.redirect || "/dashboard", {
+          replace: true,
+          state: {
+            loginSessionId: data.session_id,
+            lastUse: data.lastUse,
+          },
+        });
       } else {
         setOtpError(data?.message || "Invalid code. Please try again.");
       }
@@ -292,56 +305,61 @@ const Login = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setHasSubmitted(true); // Mark that the user tried submitting
+    setHasSubmitted(true);
 
-    // ✅ Check for weak password
+    // 1) Validate & normalize contact number to PH 11-digit mobile (e.g., 09123456789)
+    const raw = String(formData.contactno || "");
+    const digits = raw.replace(/\D/g, "");
+    let contactClean = digits;
+
+    // normalize +63xxxxxxxxxx → 0xxxxxxxxxx
+    if (contactClean.startsWith("63") && contactClean.length >= 12) {
+      contactClean = "0" + contactClean.slice(2);
+    }
+
+    // must be exactly 11 digits and start with 0
+    if (contactClean.length !== 11 || !contactClean.startsWith("0")) {
+      setSnackbarMessage("Contact number must be exactly 11 digits and start with 0 (e.g., 09123456789).");
+      setSnackbarSeverity("error");
+      setSnackbarOpen(true);
+      return;
+    }
+
+    // 2) Password checks
     if (
       !passwordChecklist.length ||
       !passwordChecklist.uppercase ||
       !passwordChecklist.number ||
       !passwordChecklist.specialChar
     ) {
-      setSnackbarMessage(
-        "Password is too weak. Please follow the required rules."
-      );
+      setSnackbarMessage("Password is too weak. Please follow the required rules.");
       setSnackbarSeverity("error");
       setSnackbarOpen(true);
       return;
     }
 
-    // Validate password match
     if (formData.password !== formData.confirmPassword) {
-      setSnackbarMessage(
-        "Passwords do not match. Please correct them before submitting."
-      );
+      setSnackbarMessage("Passwords do not match. Please correct them before submitting.");
       setSnackbarSeverity("error");
       setSnackbarOpen(true);
       return;
     }
 
-    console.log("Success");
-
+    // 3) Submit with cleaned contact number
     try {
-      const response = await fetch(
-        `${process.env.REACT_APP_API_BASE_URL}/signup`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(formData),
-        }
-      );
+      const payload = { ...formData, contactno: contactClean }; // use cleaned value
+      const response = await fetch(`${process.env.REACT_APP_API_BASE_URL}/signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
       const data = await response.json();
       if (response.ok) {
-        setSnackbarMessage(
-          "Signup successful! Check email on application status"
-        );
+        setSnackbarMessage("Signup successful! Check email on application status");
         setSnackbarSeverity("success");
         setSnackbarOpen(true);
         setIsFlipped(false);
-
         setFormData(emptyFormData);
       } else {
         setErrorMessage(data.message || "Signup failed");
