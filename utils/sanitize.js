@@ -1,8 +1,18 @@
 // utils/sanitize.js
-// For free-text fields: strip or escape dangerous chars
-// Option A (strip a few characters quickly):
+
 function stripDangerousChars(s) {
   return String(s || "").replace(/[<>{}]/g, "");
 }
 
-module.exports = { stripDangerousChars };
+const norm = (s) => String(s ?? "").trim();
+
+const toNum = (v) =>
+  v === null || v === undefined || v === "" || Number.isNaN(+v) ? null : +v;
+
+const asDate = (s) => {
+  if (!s) return null;
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+};
+
+module.exports = { stripDangerousChars, norm, toNum, asDate };

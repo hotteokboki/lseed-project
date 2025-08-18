@@ -28,6 +28,7 @@ const securityRoutes = require("./routes/securityRoutes");
 const mentorshipRoutes = require("./routes/mentorships");
 const cashflowRoutes = require("./routes/cashflowRoutes");
 const inventoryRoutes = require("./routes/inventoryRoutes");
+const reportsRoutes = require("./routes/reportsRoutes");
 
 const { getMentorsBySocialEnterprises,
   getMentorById,
@@ -313,6 +314,7 @@ app.use('/api', isAuthenticated, isAjaxRequest, doubleCsrfProtection);
 app.use("/api/cashflow", cashflowRoutes);
 app.use("/api/inventory-distribution", inventoryRoutes);
 app.use("/auth", authRoutes);
+app.use("/api/reports", reportsRoutes);
 app.use("/api/mentorships", mentorshipRoutes);
 app.use("/api/profile", requireAuth, profileRoutes);
 app.use("/api/security", requireAuth, securityRoutes);
@@ -376,133 +378,6 @@ app.use('/login', async (req, res, next) => {
   });
 
   next();
-});
-
-app.post("/api/import/:reportType", async (req, res) => {
-  const { reportType } = req.params;
-  const data = req.body.data; // expects { data: [...], se_id: ..., user_id: ... }
-  const seId = req.body.se_id;
-  const userId = req.session.user?.id;
-
-  const ipAddress = (req.headers["x-forwarded-for"] || req.ip || req.connection?.remoteAddress || "")
-    .split(",")[0]
-    .trim();
-  const startedAt = Date.now();
-
-  console.log("====== IMPORT DEBUG ======");
-  console.log("Session:", req.session);
-  console.log("User ID:", userId);
-  console.log("SE ID:", seId);
-  console.log("Report Type:", reportType);
-  console.log("Data keys:", Array.isArray(data) && data.length > 0 ? Object.keys(data[0]) : []);
-  console.log("First row preview:", Array.isArray(data) && data.length > 0 ? data[0] : null);
-
-  if (!userId || !seId || !Array.isArray(data)) {
-    return res.status(400).json({ message: "Missing required information" });
-  }
-
-  // 🔎 Best-effort SE name lookup for logs
-  let seName = null;
-  try {
-    const seRes = await pgDatabase.query(
-      `SELECT team_name FROM socialenterprises WHERE se_id = $1`,
-      [seId]
-    );
-    seName = seRes.rows[0]?.team_name || null;
-  } catch (e) {
-    console.warn("SE name lookup failed:", e?.message || e);
-  }
-
-  try {
-    const insertFunctions = {
-      financial_statements: async (row) =>
-        await pgDatabase.query(
-          `INSERT INTO financial_statements (se_id, entered_by, date, total_revenue, total_expenses, net_income, total_assets, total_liabilities, owner_equity)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [seId, userId, row.date, row.total_revenue, row.total_expenses, row.net_income, row.total_assets, row.total_liabilities, row.owner_equity]
-        ),
-
-      inventory_report: async (row) =>
-        await pgDatabase.query(
-          `INSERT INTO inventory_report (se_id, entered_by, item_name, qty, price, amount)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [seId, userId, row.item_name, row.qty, row.price, row.amount]
-        ),
-
-      cash_in: async (row) =>
-        await pgDatabase.query(
-          `INSERT INTO cash_in (se_id, "enteredBy", date, sales, "otherRevenue", assets, liability, "ownerCapital", notes, cash)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-          [seId, userId, row.date, row.sales, row.otherRevenue, row.assets, row.liability, row.ownerCapital, row.notes, row.cash]
-        ),
-
-      cash_out: async (row) =>
-        await pgDatabase.query(
-          `INSERT INTO cash_out (se_id, "enteredBy", date, cash, expenses, assets, inventory, liability, "ownerWithdrawal", notes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-          [seId, userId, row.date, row.cash, row.expenses, row.assets, row.inventory, row.liability, row.ownerWithdrawal, row.notes]
-        ),
-    };
-
-    const insertFn = insertFunctions[reportType];
-    if (!insertFn) {
-      return res.status(400).json({ message: "Unsupported report type" });
-    }
-
-    let imported = 0;
-
-    for (const row of data) {
-      // Excel serial -> YYYY-MM-DD
-      if (!isNaN(row.date)) {
-        const excelEpoch = new Date(Date.UTC(1899, 11, 30));
-        const convertedDate = new Date(excelEpoch.getTime() + row.date * 86400000);
-        row.date = convertedDate.toISOString().slice(0, 10);
-      }
-      await insertFn(row);
-      imported++;
-    }
-
-    // ✅ Audit log (success)
-    await pgDatabase.query(
-      `INSERT INTO audit_logs (user_id, action, details, ip_address)
-   VALUES ($1, $2, $3, $4)`,
-      [
-        userId,
-        "Report Import",
-        JSON.stringify({
-          report_type: reportType,
-          social_enterprise_name: seName || null,
-        }),
-        ipAddress,
-      ]
-    );
-
-    return res.status(200).json({ message: "Data imported successfully" });
-  } catch (error) {
-    console.error("Error importing data:", error);
-
-    // ❌ Audit log (failure) — same minimal fields
-    try {
-      // ❌ Audit log (failure)
-      await pgDatabase.query(
-        `INSERT INTO audit_logs (user_id, action, details, ip_address)
-          VALUES ($1, $2, $3, $4)`,
-        [
-          userId,
-          "Report Import Failed",
-          JSON.stringify({
-            report_type: reportType,
-            social_enterprise_name: seName || null,
-          }),
-          ipAddress,
-        ]
-      );
-    } catch (logErr) {
-      console.error("Failed to write audit log:", logErr);
-    }
-
-    return res.status(500).json({ message: "Internal Server Error" });
-  }
 });
 
 // Temporary storage for user states

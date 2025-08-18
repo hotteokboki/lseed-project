@@ -1,6 +1,5 @@
-import { useEffect } from "react";
-import axios from "axios";
-import React, { useRef, useState } from "react";
+// src/scenes/reports/index.jsx
+import React, { useEffect, useRef, useState } from "react";
 import {
   Box,
   Button,
@@ -10,7 +9,8 @@ import {
   MenuItem,
   InputLabel,
   FormControl,
-  LinearProgress, // ▼ NEW
+  LinearProgress,
+  TextField,
 } from "@mui/material";
 import Header from "../../components/Header";
 import { tokens } from "../../theme";
@@ -21,20 +21,81 @@ const Reports = () => {
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
 
-  const fileInputRef = useRef(null);
-
   const [parsedData, setParsedData] = useState({});
   const [fileName, setFileName] = useState("");
   const [selectedSE, setSelectedSE] = useState("");
   const [socialEnterprises, setSocialEnterprises] = useState([]);
-  const [selectedReportType, setSelectedReportType] = useState("");
+  const [selectedReportType] = useState(""); // kept for possible future override
 
-  // ▼ NEW: direct-upload state
+  // direct-upload state (kept for future use)
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState("");
 
+  // --- Financial statement generation (bottom section) ---
+  const [genMonth, setGenMonth] = useState(""); // yyyy-MM
+  const [genLoading, setGenLoading] = useState(false);
+  const [genMsg, setGenMsg] = useState("");
+  const [genResult, setGenResult] = useState(null);
+
   const normalizeColumnName = (colName) => {
     return String(colName || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  };
+
+  // normalize a cell (no name-based classification)
+  const norm = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+
+  // Collect asset/expense names in parsedData, ask backend to upsert and return IDs.
+  const ensureRefMaps = async (pd) => {
+    const assets = new Set();
+    const expenses = new Set();
+
+    // From Cash In
+    (pd.cash_in || []).forEach((r) => {
+      if (r.rawMaterials != null) assets.add("Raw Materials");
+      if (r.cashUnderAssets != null) assets.add("Cash (Assets)");
+      if (r.savings != null) assets.add("Savings");
+      // dynamic assets
+      if (r.__dynamicAssets) {
+        Object.keys(r.__dynamicAssets).forEach((k) => assets.add(k));
+      }
+    });
+
+    // From Cash Out
+    (pd.cash_out || []).forEach((r) => {
+      if (r.cashUnderAssets != null) assets.add("Cash (Assets)");
+      if (r.investments != null) assets.add("Investments");
+      if (r.savings != null) assets.add("Savings");
+      if (r.utilities != null) expenses.add("Utilities");
+      if (r.officeSupplies != null) expenses.add("Office Supplies");
+      // dynamic
+      if (r.__dynamicAssets) {
+        Object.keys(r.__dynamicAssets).forEach((k) => assets.add(k));
+      }
+      if (r.__dynamicExpenses) {
+        Object.keys(r.__dynamicExpenses).forEach((k) => expenses.add(k));
+      }
+    });
+
+    try {
+      const { data } = await axiosClient.post("/api/reports/import/ensure-refs", {
+        assets: [...assets],
+        expenses: [...expenses],
+      });
+      const toLCMap = (m = {}) =>
+        Object.fromEntries(Object.entries(m).map(([k, v]) => [k.toLowerCase(), v]));
+      const maps = {
+        assetMap: toLCMap(data.assetMap || {}),
+        expenseMap: toLCMap(data.expenseMap || {}),
+      };
+      console.log("[ensureRefMaps] resolved maps:", maps);
+      return maps;
+    } catch (err) {
+      console.warn(
+        "[ensureRefMaps] endpoint not ready or failed; falling back to names only.",
+        err?.response?.data || err.message
+      );
+      return { assetMap: {}, expenseMap: {} };
+    }
   };
 
   const columnMapping = {
@@ -133,23 +194,35 @@ const Reports = () => {
       const newParsedData = {};
 
       const allowedAuto = [
-        "cash in", "cash_in",
-        "cash out", "cash_out",
-        "inventory", "inventory report", "inventory template",
+        "cash in",
+        "cash_in",
+        "cash out",
+        "cash_out",
+        "inventory",
+        "inventory report",
+        "inventory template",
       ];
 
       const lowerFileName = file.name.toLowerCase();
 
       const hintFilters = {
         cash_in: (s) =>
-          s.includes("cash in") || s.includes("cash_in") ||
-          lowerFileName.includes("cash in") || lowerFileName.includes("cash_in"),
+          s.includes("cash in") ||
+          s.includes("cash_in") ||
+          lowerFileName.includes("cash in") ||
+          lowerFileName.includes("cash_in"),
         cash_out: (s) =>
-          s.includes("cash out") || s.includes("cash_out") ||
-          lowerFileName.includes("cash out") || lowerFileName.includes("cash_out"),
+          s.includes("cash out") ||
+          s.includes("cash_out") ||
+          lowerFileName.includes("cash out") ||
+          lowerFileName.includes("cash_out"),
         inventory_report: (s) =>
-          s.includes("inventory") || s.includes("inventory report") || s.includes("inventory template") ||
-          lowerFileName.includes("inventory") || lowerFileName.includes("inventory report") || lowerFileName.includes("inventory template"),
+          s.includes("inventory") ||
+          s.includes("inventory report") ||
+          s.includes("inventory template") ||
+          lowerFileName.includes("inventory") ||
+          lowerFileName.includes("inventory report") ||
+          lowerFileName.includes("inventory template"),
       };
 
       // 1) Decide which sheets to parse
@@ -208,8 +281,7 @@ const Reports = () => {
           lowerSheetName.includes("inventory report") ||
           lowerFileName.includes("inventory report") ||
           lowerSheetName.includes("inventory") ||
-          lowerFileName.includes("inventory") ||
-          selectedReportType === "inventory_report"
+          lowerFileName.includes("inventory")
         ) {
           targetTable = "inventory_report";
 
@@ -228,7 +300,9 @@ const Reports = () => {
 
           let currentItem = null; // { item_name, item_price, item_beginning_inventory, item_less_count, bom_name }
           const isHeaderRow = (txt) => txt.toLowerCase().startsWith("item name:");
-          const isBeginning = (txt) => txt.toLowerCase().startsWith("beginning inventory") || txt.toLowerCase().startsWith("beggining inventory");
+          const isBeginning = (txt) =>
+            txt.toLowerCase().startsWith("beginning inventory") ||
+            txt.toLowerCase().startsWith("beggining inventory");
           const isLessFinal = (txt) => txt.toLowerCase().startsWith("less: final count");
           const isAddPurchases = (txt) => txt.toLowerCase().startsWith("add: purchases");
           const isEnding = (txt) => txt.toLowerCase().startsWith("ending inventory");
@@ -242,7 +316,6 @@ const Reports = () => {
             return Number.isFinite(n) ? n : null;
           };
 
-          // ⬇️ ADD THIS HELPER RIGHT HERE
           const isNoise = (txt) => {
             const t = String(txt || "").toLowerCase();
             return (
@@ -256,8 +329,8 @@ const Reports = () => {
           };
 
           // Start exactly at the first "Item Name:" so we don't skip the first item
-          const firstItemIdx = rawData.findIndex(
-            r => String(r?.[0] || "").trim().toLowerCase().startsWith("item name:")
+          const firstItemIdx = rawData.findIndex((r) =>
+            String(r?.[0] || "").trim().toLowerCase().startsWith("item name:")
           );
           let invRows = firstItemIdx !== -1 ? rawData.slice(firstItemIdx) : rawData;
 
@@ -345,6 +418,72 @@ const Reports = () => {
           return;
         }
 
+        // --------- DYNAMIC BAND DETECTION FOR CASH SHEETS (no whitelists) ----------
+        if (targetTable === "cash_in" || targetTable === "cash_out") {
+          // Find the row that contains "Expenses" / "Assets"
+          let groupRowIdx = -1;
+          let expenseStart = -1;
+          let assetStart = -1;
+
+          for (let r = 0; r < Math.min(15, rawData.length); r++) {
+            const row = rawData[r] || [];
+            const eIdx = row.findIndex((c) => /^(expenses?)$/i.test(norm(c)));
+            const aIdx = row.findIndex((c) => /^(assets?)$/i.test(norm(c)));
+            if (eIdx !== -1 || aIdx !== -1) {
+              groupRowIdx = r;
+              if (eIdx !== -1) expenseStart = eIdx;
+              if (aIdx !== -1) assetStart = aIdx;
+              break;
+            }
+          }
+
+          // Heuristic: subheader row = first row below the group row with 2+ non-empty cells
+          let subHeaderIdx = -1;
+          if (groupRowIdx !== -1) {
+            for (let r = groupRowIdx + 1; r < Math.min(groupRowIdx + 6, rawData.length); r++) {
+              const cells = (rawData[r] || []).map(norm);
+              const nonEmpty = cells.filter(Boolean).length;
+              if (nonEmpty >= 2) {
+                subHeaderIdx = r;
+                break;
+              }
+            }
+          }
+
+          let expenseColsMeta = [];
+          let assetColsMeta = [];
+          if (subHeaderIdx !== -1) {
+            const cells = (rawData[subHeaderIdx] || []).map(norm);
+
+            for (let col = 0; col < cells.length; col++) {
+              const label = cells[col];
+              if (!label) continue;
+
+              // belongs to Expenses band
+              if (expenseStart !== -1 && col >= expenseStart && (assetStart === -1 || col < assetStart)) {
+                expenseColsMeta.push({ idx: col, label });
+                continue;
+              }
+              // belongs to Assets band
+              if (assetStart !== -1 && col >= assetStart) {
+                assetColsMeta.push({ idx: col, label });
+              }
+            }
+          }
+
+          if (targetTable === "cash_out") {
+            newParsedData.__cash_out_meta = {
+              expenseCols: expenseColsMeta, // [{ idx, label }]
+              assetCols: assetColsMeta, // [{ idx, label }]
+            };
+          } else if (targetTable === "cash_in") {
+            newParsedData.__cash_in_meta = {
+              assetCols: assetColsMeta, // [{ idx, label }]
+            };
+          }
+        }
+        // --------------------------------------------------------------------------
+
         // Slice rows
         if (targetTable === "cash_in" || targetTable === "cash_out") {
           dataRows = rawData.length < 6 ? rawData.slice(1) : rawData.slice(5);
@@ -369,7 +508,8 @@ const Reports = () => {
             firstCell === "total quantity" ||
             firstCell === "final count" ||
             firstCell === "final total cost of goods sold"
-          ) return false;
+          )
+            return false;
           return firstCell !== "";
         });
 
@@ -384,54 +524,143 @@ const Reports = () => {
               const dateValue = String(row[0] || "").trim();
               if (dateValue !== "") newRow["date"] = dateValue;
 
-              const cash = parseNumericValue(row[1]); if (cash !== null) newRow["cash"] = cash;
-              const sales = parseNumericValue(row[2]); if (sales !== null) newRow["sales"] = sales;
-              const otherRevenue = parseNumericValue(row[3]); if (otherRevenue !== null) newRow["otherRevenue"] = otherRevenue;
-              const rawMaterials = parseNumericValue(row[4]); if (rawMaterials !== null) newRow["rawMaterials"] = rawMaterials;
-              const cashUnderAssets = parseNumericValue(row[5]); if (cashUnderAssets !== null) newRow["cashUnderAssets"] = cashUnderAssets;
-              const savings = parseNumericValue(row[6]); if (savings !== null) newRow["savings"] = savings;
+              const cash = parseNumericValue(row[1]);
+              if (cash !== null) newRow["cash"] = cash;
+              const sales = parseNumericValue(row[2]);
+              if (sales !== null) newRow["sales"] = sales;
+              const otherRevenue = parseNumericValue(row[3]);
+              if (otherRevenue !== null) newRow["otherRevenue"] = otherRevenue;
 
-              let totalAssets = 0; let hasAnyAssetComponent = false;
-              if (rawMaterials !== null) { totalAssets += rawMaterials; hasAnyAssetComponent = true; }
-              if (cashUnderAssets !== null) { totalAssets += cashUnderAssets; hasAnyAssetComponent = true; }
-              if (savings !== null) { totalAssets += savings; hasAnyAssetComponent = true; }
-              if (totalAssets !== 0) newRow["assets"] = totalAssets; else if (hasAnyAssetComponent) newRow["assets"] = 0;
+              // (legacy specific cols if present)
+              const rawMaterials = parseNumericValue(row[4]);
+              if (rawMaterials !== null) newRow["rawMaterials"] = rawMaterials;
+              const cashUnderAssets = parseNumericValue(row[5]);
+              if (cashUnderAssets !== null) newRow["cashUnderAssets"] = cashUnderAssets;
+              const savings = parseNumericValue(row[6]);
+              if (savings !== null) newRow["savings"] = savings;
 
-              const liability = parseNumericValue(row[7]); if (liability !== null) newRow["liability"] = liability;
-              const ownerCapital = parseNumericValue(row[8]); if (ownerCapital !== null) newRow["ownerCapital"] = ownerCapital;
-              const notesValue = String(row[9] || "").trim(); if (notesValue !== "") newRow["notes"] = notesValue;
-              const enteredByValue = String(row[10] || "").trim(); if (enteredByValue !== "") newRow["enteredBy"] = enteredByValue;
+              let totalAssets = 0;
+              let hasAnyAssetComponent = false;
+              if (rawMaterials !== null) {
+                totalAssets += rawMaterials;
+                hasAnyAssetComponent = true;
+              }
+              if (cashUnderAssets !== null) {
+                totalAssets += cashUnderAssets;
+                hasAnyAssetComponent = true;
+              }
+              if (savings !== null) {
+                totalAssets += savings;
+                hasAnyAssetComponent = true;
+              }
+              if (totalAssets !== 0) newRow["assets"] = totalAssets;
+              else if (hasAnyAssetComponent) newRow["assets"] = 0;
 
+              const liability = parseNumericValue(row[7]);
+              if (liability !== null) newRow["liability"] = liability;
+              const ownerCapital = parseNumericValue(row[8]);
+              if (ownerCapital !== null) newRow["ownerCapital"] = ownerCapital;
+              const notesValue = String(row[9] || "").trim();
+              if (notesValue !== "") newRow["notes"] = notesValue;
+              const enteredByValue = String(row[10] || "").trim();
+              if (enteredByValue !== "") newRow["enteredBy"] = enteredByValue;
+
+              // ---- dynamic Assets for Cash In (no whitelists) ----
+              const meta = newParsedData.__cash_in_meta || { assetCols: [] };
+              if (meta.assetCols.length) {
+                const dynAst = {};
+                for (const { idx, label } of meta.assetCols) {
+                  const v = parseNumericValue(row[idx]);
+                  if (v !== null) dynAst[label] = v;
+                }
+                if (Object.keys(dynAst).length) newRow.__dynamicAssets = dynAst;
+              }
             } else if (targetTable === "cash_out") {
               if (globalReportDate !== null) newRow["month"] = globalReportDate;
-              const dateValue = String(row[0] || "").trim(); if (dateValue !== "") newRow["date"] = dateValue;
+              const dateValue = String(row[0] || "").trim();
+              if (dateValue !== "") newRow["date"] = dateValue;
 
-              const cash = parseNumericValue(row[1]); if (cash !== null) newRow["cash"] = cash;
-              const utilities = parseNumericValue(row[3]); if (utilities !== null) newRow["utilities"] = utilities;
-              const officeSupplies = parseNumericValue(row[4]); if (officeSupplies !== null) newRow["officeSupplies"] = officeSupplies;
+              const cash = parseNumericValue(row[1]);
+              if (cash !== null) newRow["cash"] = cash;
 
-              let totalExpenses = 0; let hasAnyExpenseComponent = false;
-              if (utilities !== null) { totalExpenses += utilities; hasAnyExpenseComponent = true; }
-              if (officeSupplies !== null) { totalExpenses += officeSupplies; hasAnyExpenseComponent = true; }
-              if (totalExpenses !== 0) newRow["expenses"] = totalExpenses; else if (hasAnyExpenseComponent) newRow["expenses"] = 0;
+              // (legacy specific cols if present)
+              const utilities = parseNumericValue(row[3]);
+              if (utilities !== null) newRow["utilities"] = utilities;
+              const officeSupplies = parseNumericValue(row[4]);
+              if (officeSupplies !== null) newRow["officeSupplies"] = officeSupplies;
 
-              const cashUnderAssets = parseNumericValue(row[10]); if (cashUnderAssets !== null) newRow["cashUnderAssets"] = cashUnderAssets;
-              const investments = parseNumericValue(row[11]); if (investments !== null) newRow["investments"] = investments;
-              const savings = parseNumericValue(row[12]); if (savings !== null) newRow["savings"] = savings;
+              let totalExpenses = 0;
+              let hasAnyExpenseComponent = false;
+              if (utilities !== null) {
+                totalExpenses += utilities;
+                hasAnyExpenseComponent = true;
+              }
+              if (officeSupplies !== null) {
+                totalExpenses += officeSupplies;
+                hasAnyExpenseComponent = true;
+              }
+              if (totalExpenses !== 0) newRow["expenses"] = totalExpenses;
+              else if (hasAnyExpenseComponent) newRow["expenses"] = 0;
 
-              let totalAssets = 0; let hasAnyAssetComponent = false;
-              if (cashUnderAssets !== null) { totalAssets += cashUnderAssets; hasAnyAssetComponent = true; }
-              if (investments !== null) { totalAssets += investments; hasAnyAssetComponent = true; }
-              if (savings !== null) { totalAssets += savings; hasAnyAssetComponent = true; }
-              if (totalAssets !== 0) newRow["assets"] = totalAssets; else if (hasAnyAssetComponent) newRow["assets"] = 0;
+              const cashUnderAssets = parseNumericValue(row[10]);
+              if (cashUnderAssets !== null) newRow["cashUnderAssets"] = cashUnderAssets;
+              const investments = parseNumericValue(row[11]);
+              if (investments !== null) newRow["investments"] = investments;
+              const savings = parseNumericValue(row[12]);
+              if (savings !== null) newRow["savings"] = savings;
 
-              const inventory = parseNumericValue(row[13]); if (inventory !== null) newRow["inventory"] = inventory;
-              const liability = parseNumericValue(row[14]); if (liability !== null) newRow["liability"] = liability;
-              const ownerWithdrawal = parseNumericValue(row[15]); if (ownerWithdrawal !== null) newRow["ownerWithdrawal"] = ownerWithdrawal;
+              let totalAssets = 0;
+              let hasAnyAssetComponent = false;
+              if (cashUnderAssets !== null) {
+                totalAssets += cashUnderAssets;
+                hasAnyAssetComponent = true;
+              }
+              if (investments !== null) {
+                totalAssets += investments;
+                hasAnyAssetComponent = true;
+              }
+              if (savings !== null) {
+                totalAssets += savings;
+                hasAnyAssetComponent = true;
+              }
+              if (totalAssets !== 0) newRow["assets"] = totalAssets;
+              else if (hasAnyAssetComponent) newRow["assets"] = 0;
 
-              const notesValue = String(row[16] || "").trim(); if (notesValue !== "") newRow["notes"] = notesValue;
-              const enteredByValue = String(row[17] || "").trim(); if (enteredByValue !== "") newRow["enteredBy"] = enteredByValue;
+              const inventory = parseNumericValue(row[13]);
+              if (inventory !== null) newRow["inventory"] = inventory;
+              const liability = parseNumericValue(row[14]);
+              if (liability !== null) newRow["liability"] = liability;
+              const ownerWithdrawal = parseNumericValue(row[15]);
+              if (ownerWithdrawal !== null) newRow["ownerWithdrawal"] = ownerWithdrawal;
 
+              const notesValue = String(row[16] || "").trim();
+              if (notesValue !== "") newRow["notes"] = notesValue;
+              const enteredByValue = String(row[17] || "").trim();
+              if (enteredByValue !== "") newRow["enteredBy"] = enteredByValue;
+
+              // ---- dynamic Expenses/Assets for Cash Out (no whitelists) ----
+              const meta = newParsedData.__cash_out_meta || {
+                expenseCols: [],
+                assetCols: [],
+              };
+
+              if (meta.expenseCols.length) {
+                const dynExp = {};
+                for (const { idx, label } of meta.expenseCols) {
+                  const v = parseNumericValue(row[idx]);
+                  if (v !== null) dynExp[label] = v;
+                }
+                if (Object.keys(dynExp).length) newRow.__dynamicExpenses = dynExp;
+              }
+
+              if (meta.assetCols.length) {
+                const dynAst = {};
+                for (const { idx, label } of meta.assetCols) {
+                  const v = parseNumericValue(row[idx]);
+                  if (v !== null) dynAst[label] = v;
+                }
+                if (Object.keys(dynAst).length) newRow.__dynamicAssets = dynAst;
+              }
             } else if (targetTable === "inventory_report") {
               if (globalReportDate !== null) newRow["month"] = globalReportDate;
 
@@ -447,12 +676,14 @@ const Reports = () => {
                 newRow["item_name"] = rawItemLabel;
               }
 
-              const qty = parseNumericValue(row[1]); if (qty !== null) newRow["qty"] = qty;
-              const price = parseNumericValue(row[2]); if (price !== null) newRow["price"] = price;
-              const amount = parseNumericValue(row[3]); if (amount !== null) newRow["amount"] = amount;
-
+              const qty = parseNumericValue(row[1]);
+              if (qty !== null) newRow["qty"] = qty;
+              const price = parseNumericValue(row[2]);
+              if (price !== null) newRow["price"] = price;
+              const amount = parseNumericValue(row[3]);
+              if (amount !== null) newRow["amount"] = amount;
             } else {
-              // financial_statements
+              // financial_statements (keeping mapping for future)
               const mainHeader = rawData[0];
               mainHeader.forEach((header, index) => {
                 const mappedColName = columnMapping[targetTable]?.[normalizeColumnName(header)];
@@ -510,9 +741,9 @@ const Reports = () => {
     // try a full date first
     const tryDate = (s) => {
       const d = new Date(s);
-      return isNaN(d.getTime()) ? null : new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1))
-        .toISOString()
-        .slice(0, 10);
+      return isNaN(d.getTime())
+        ? null
+        : new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0, 10);
     };
 
     if (monthCell && typeof monthCell === "string") {
@@ -520,9 +751,21 @@ const Reports = () => {
       // "April" or "April 2025"
       const m = s.match(/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s*(\d{4})?$/i);
       if (m) {
-        const monthIdx = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
-          .indexOf(m[1].toLowerCase());
-        const year = m[2] ? parseInt(m[2], 10) : (new Date()).getUTCFullYear();
+        const monthIdx = [
+          "jan",
+          "feb",
+          "mar",
+          "apr",
+          "may",
+          "jun",
+          "jul",
+          "aug",
+          "sep",
+          "oct",
+          "nov",
+          "dec",
+        ].indexOf(m[1].toLowerCase());
+        const year = m[2] ? parseInt(m[2], 10) : new Date().getUTCFullYear();
         return new Date(Date.UTC(year, monthIdx, 1)).toISOString().slice(0, 10);
       }
       // "Month: June 2025" already trimmed in parser → try as date
@@ -538,85 +781,161 @@ const Reports = () => {
     return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0, 10);
   };
 
-  // Build structured cash-in payload from your parsed rows
-  const buildCashInStructured = (rows) => {
-    // figure out report_month: use the "month" field of the first row if any, else from date
+  // --- Cash In: uses asset_id when available; falls back to asset_name --- //
+  const buildCashInStructured = (rows, assetMap) => {
     const first = rows[0] || {};
     const report_month = monthStartISO(first.month, first.date);
 
     const transactions = [];
     for (const r of rows) {
-      const base = {
-        transaction_date: r.date,           // server converts to date
-        cash_amount: r.cash ?? null,
-        sales_amount: r.sales ?? null,
-        other_revenue_amount: r.otherRevenue ?? null,
-        liability_amount: r.liability ?? null,
-        owners_capital_amount: r.ownerCapital ?? null,
-        note: r.notes ?? null,
-        entered_by: r.enteredBy ?? null,
-      };
+      const baseHasAny =
+        r.cash != null ||
+        r.sales != null ||
+        r.otherRevenue != null ||
+        r.liability != null ||
+        r.ownerCapital != null ||
+        (r.notes && r.notes !== "") ||
+        (r.enteredBy && r.enteredBy !== "");
 
-      // If there are no asset parts, push a single base transaction
-      const assetParts = [
-        { name: "Raw Materials", amount: r.rawMaterials },
-        { name: "Cash (Assets)", amount: r.cashUnderAssets },
-        { name: "Savings", amount: r.savings },
-      ].filter(p => p.amount != null && p.amount !== 0);
+      if (baseHasAny) {
+        const base = {
+          transaction_date: r.date,
+          cash_amount: r.cash ?? null,
+          sales_amount: r.sales ?? null,
+          other_revenue_amount: r.otherRevenue ?? null,
+          asset_id: null, // base line not tied to a specific asset
+          liability_amount: r.liability ?? null,
+          owners_capital_amount: r.ownerCapital ?? null,
+          note: r.notes ?? null,
+          entered_by: r.enteredBy ?? null,
+        };
+        transactions.push(base);
+      }
 
-      if (assetParts.length === 0) {
-        transactions.push({ ...base, asset_name: null, asset_amount: null });
-      } else {
-        // one transaction per asset component (schema has a single asset_id per row)
-        for (const p of assetParts) {
-          transactions.push({ ...base, asset_name: p.name, asset_amount: p.amount });
-        }
+      // Split asset components -> one line each
+      const parts = [
+        { name: "Raw Materials", amt: r.rawMaterials },
+        { name: "Cash (Assets)", amt: r.cashUnderAssets },
+        { name: "Savings", amt: r.savings },
+      ].filter((p) => p.amt != null && p.amt !== 0);
+
+      // dynamic assets
+      if (r.__dynamicAssets) {
+        Object.entries(r.__dynamicAssets).forEach(([label, amt]) => {
+          if (amt != null && amt !== 0) parts.push({ name: label, amt });
+        });
+      }
+
+      for (const p of parts) {
+        const idFromMap = assetMap?.[p.name.toLowerCase()];
+        const line = {
+          transaction_date: r.date,
+          cash_amount: p.amt,
+          sales_amount: null,
+          other_revenue_amount: null,
+          asset_id: idFromMap || null,
+          asset_name: idFromMap ? undefined : p.name,
+          liability_amount: null,
+          owners_capital_amount: null,
+          note: r.notes ?? null,
+          entered_by: r.enteredBy ?? null,
+        };
+        transactions.push(line);
       }
     }
 
     return { report_month, transactions };
   };
 
-  // Build structured cash-out payload from your parsed rows
-  const buildCashOutStructured = (rows) => {
+  // --- Cash Out: uses expense_id / asset_id when available; falls back to names --- //
+  const buildCashOutStructured = (rows, assetMap, expenseMap) => {
     const first = rows[0] || {};
     const report_month = monthStartISO(first.month, first.date);
 
     const transactions = [];
     for (const r of rows) {
-      const base = {
-        transaction_date: r.date,
-        cash_amount: r.cash ?? null,
-        inventory_amount: r.inventory ?? null,
-        liability_amount: r.liability ?? null,
-        owners_withdrawal_amount: r.ownerWithdrawal ?? null,
-        note: r.notes ?? null,
-        entered_by: r.enteredBy ?? null,
-      };
+      const baseHasAny =
+        r.cash != null ||
+        r.inventory != null ||
+        r.liability != null ||
+        r.ownerWithdrawal != null ||
+        (r.notes && r.notes !== "") ||
+        (r.enteredBy && r.enteredBy !== "");
 
-      // Expenses → separate transactions (utilities, office supplies)
+      if (baseHasAny) {
+        const base = {
+          transaction_date: r.date,
+          cash_amount: r.cash ?? null,
+          expense_id: null,
+          asset_id: null,
+          inventory_amount: r.inventory ?? null,
+          liability_amount: r.liability ?? null,
+          owners_withdrawal_amount: r.ownerWithdrawal ?? null,
+          note: r.notes ?? null,
+          entered_by: r.enteredBy ?? null,
+        };
+        transactions.push(base);
+      }
+
+      // Expense components -> cash_amount + expense_id/name
       const expenseParts = [
-        { name: "Utilities", amount: r.utilities },
-        { name: "Office Supplies", amount: r.officeSupplies },
-      ].filter(p => p.amount != null && p.amount !== 0);
+        { name: "Utilities", amt: r.utilities },
+        { name: "Office Supplies", amt: r.officeSupplies },
+      ].filter((p) => p.amt != null && p.amt !== 0);
 
-      // Assets → separate transactions
+      // dynamic expenses
+      if (r.__dynamicExpenses) {
+        Object.entries(r.__dynamicExpenses).forEach(([label, amt]) => {
+          if (amt != null && amt !== 0) expenseParts.push({ name: label, amt });
+        });
+      }
+
+      for (const e of expenseParts) {
+        const idFromMap = expenseMap?.[e.name.toLowerCase()];
+        const line = {
+          transaction_date: r.date,
+          cash_amount: e.amt,
+          expense_id: idFromMap || null,
+          expense_name: idFromMap ? undefined : e.name,
+          asset_id: null,
+          inventory_amount: null,
+          liability_amount: null,
+          owners_withdrawal_amount: null,
+          note: r.notes ?? null,
+          entered_by: r.enteredBy ?? null,
+        };
+        transactions.push(line);
+      }
+
+      // Asset components -> cash_amount + asset_id/name
       const assetParts = [
-        { name: "Cash (Assets)", amount: r.cashUnderAssets },
-        { name: "Investments", amount: r.investments },
-        { name: "Savings", amount: r.savings },
-      ].filter(p => p.amount != null && p.amount !== 0);
+        { name: "Cash (Assets)", amt: r.cashUnderAssets },
+        { name: "Investments", amt: r.investments },
+        { name: "Savings", amt: r.savings },
+      ].filter((p) => p.amt != null && p.amt !== 0);
 
-      if (expenseParts.length === 0 && assetParts.length === 0) {
-        // single base transaction only
-        transactions.push({ ...base, expense_name: null, expense_amount: null, asset_name: null, asset_amount: null });
-      } else {
-        for (const e of expenseParts) {
-          transactions.push({ ...base, expense_name: e.name, expense_amount: e.amount, asset_name: null, asset_amount: null });
-        }
-        for (const a of assetParts) {
-          transactions.push({ ...base, expense_name: null, expense_amount: null, asset_name: a.name, asset_amount: a.amount });
-        }
+      // dynamic assets
+      if (r.__dynamicAssets) {
+        Object.entries(r.__dynamicAssets).forEach(([label, amt]) => {
+          if (amt != null && amt !== 0) assetParts.push({ name: label, amt });
+        });
+      }
+
+      for (const a of assetParts) {
+        const idFromMap = assetMap?.[a.name.toLowerCase()];
+        const line = {
+          transaction_date: r.date,
+          cash_amount: a.amt,
+          expense_id: null,
+          asset_id: idFromMap || null,
+          asset_name: idFromMap ? undefined : a.name,
+          inventory_amount: null,
+          liability_amount: null,
+          owners_withdrawal_amount: null,
+          note: r.notes ?? null,
+          entered_by: r.enteredBy ?? null,
+        };
+        transactions.push(line);
       }
     }
 
@@ -634,60 +953,57 @@ const Reports = () => {
     }
 
     try {
+      console.log("[import] parsedData snapshot:", parsedData);
+
       // INVENTORY (structured)
       if (parsedData.inventory_items || parsedData.inventory_bom_lines || parsedData.inventory_report) {
         const items = parsedData.inventory_items || [];
         const bom_lines = parsedData.inventory_bom_lines || [];
-        const report_links = (parsedData.inventory_report || []).map(r => ({
+        const report_links = (parsedData.inventory_report || []).map((r) => ({
           month: r.month,
           item_name: r.item_name,
         }));
 
-        await axiosClient.post("/api/import/inventory-structured", {
-          se_id: selectedSE,
-          items,
-          bom_lines,
-          report_links,
-        });
-        console.log("Inventory structured import successful");
+        const invPayload = { se_id: selectedSE, items, bom_lines, report_links };
+        console.log("[import] POST /api/reports/import/inventory-structured ->", invPayload);
+        await axiosClient.post("/api/reports/import/inventory-structured", invPayload);
+        console.log("[import] Inventory structured import successful");
       }
+
+      // Resolve IDs first (if the backend route isn't ready, maps will be {})
+      const { assetMap, expenseMap } = await ensureRefMaps(parsedData);
 
       // CASH IN (structured)
       if (parsedData.cash_in && parsedData.cash_in.length > 0) {
-        const payload = buildCashInStructured(parsedData.cash_in);
-        await axiosClient.post("/api/import/cash-in-structured", {
+        const payload = buildCashInStructured(parsedData.cash_in, assetMap);
+        const body = {
           se_id: selectedSE,
           report_month: payload.report_month,
           transactions: payload.transactions,
-        });
-        console.log("Cash In structured import successful");
+        };
+        console.log("[import] POST /api/reports/import/cash-in-structured ->", body);
+        await axiosClient.post("/api/reports/import/cash-in-structured", body);
+        console.log("[import] Cash In structured import successful");
       }
 
       // CASH OUT (structured)
       if (parsedData.cash_out && parsedData.cash_out.length > 0) {
-        const payload = buildCashOutStructured(parsedData.cash_out);
-        await axiosClient.post("/api/import/cash-out-structured", {
+        const payload = buildCashOutStructured(parsedData.cash_out, assetMap, expenseMap);
+        const body = {
           se_id: selectedSE,
           report_month: payload.report_month,
           transactions: payload.transactions,
-        });
-        console.log("Cash Out structured import successful");
-      }
-
-      // (Optional) Financial statements (kept as-is if you still want it)
-      if (parsedData.financial_statements && parsedData.financial_statements.length > 0) {
-        await axiosClient.post("/api/import/financial_statements", {
-          se_id: selectedSE,
-          data: parsedData.financial_statements,
-        });
-        console.log("Financial Statements import successful");
+        };
+        console.log("[import] POST /api/reports/import/cash-out-structured ->", body);
+        await axiosClient.post("/api/reports/import/cash-out-structured", body);
+        console.log("[import] Cash Out structured import successful");
       }
 
       alert("Import completed!");
       setParsedData({});
       setFileName("");
     } catch (err) {
-      console.error("Structured import error:", err);
+      console.error("[import] Structured import error:", err);
       alert(err?.response?.data?.message || "Import failed. Check console for details.");
     }
   };
@@ -704,9 +1020,7 @@ const Reports = () => {
   useEffect(() => {
     const fetchSEs = async () => {
       try {
-        const response = await axiosClient.get(
-          `/api/getAllSocialEnterprisesForComparison`
-        );
+        const response = await axiosClient.get(`/api/get-all-social-enterprises`);
         setSocialEnterprises(response.data);
       } catch (error) {
         console.error("Error fetching SE list:", error);
@@ -725,7 +1039,85 @@ const Reports = () => {
       .join(" ");
   };
 
-  // ▼ NEW: direct-upload helpers
+  const buildPreviewRowsAndColumns = (reportTypeKey, source = parsedData) => {
+    const src = source?.[reportTypeKey];
+    const rowsSrc = Array.isArray(src) ? src.slice(0, 5) : [];
+
+    const kvList = (obj) => {
+      if (!obj || typeof obj !== "object") return [];
+      return Object.entries(obj)
+        .filter(([, v]) => v !== null && v !== undefined && v !== "" && !Number.isNaN(v))
+        .map(([k, v]) => `${k}: ${v}`);
+    };
+
+    const rows = rowsSrc.map((row) => {
+      const r = { ...row };
+
+      if (reportTypeKey === "cash_in") {
+        const assets = [];
+        if (row.rawMaterials != null) assets.push(`Raw Materials: ${row.rawMaterials}`);
+        if (row.cashUnderAssets != null) assets.push(`Cash (Assets): ${row.cashUnderAssets}`);
+        if (row.savings != null) assets.push(`Savings: ${row.savings}`);
+        assets.push(...kvList(row.__dynamicAssets));
+        if (assets.length) r["Detected Assets"] = assets.join(" | ");
+      } else if (reportTypeKey === "cash_out") {
+        const exp = [];
+        const assets = [];
+        if (row.utilities != null) exp.push(`Utilities: ${row.utilities}`);
+        if (row.officeSupplies != null) exp.push(`Office Supplies: ${row.officeSupplies}`);
+        exp.push(...kvList(row.__dynamicExpenses));
+
+        if (row.cashUnderAssets != null) assets.push(`Cash (Assets): ${row.cashUnderAssets}`);
+        if (row.investments != null) assets.push(`Investments: ${row.investments}`);
+        if (row.savings != null) assets.push(`Savings: ${row.savings}`);
+        assets.push(...kvList(row.__dynamicAssets));
+
+        if (exp.length) r["Detected Expenses"] = exp.join(" | ");
+        if (assets.length) r["Detected Assets"] = assets.join(" | ");
+      }
+
+      // prevent objects from becoming columns/cells
+      delete r.__dynamicExpenses;
+      delete r.__dynamicAssets;
+
+      return r;
+    });
+
+    const colSet = new Set();
+    rows.forEach((r) =>
+      Object.keys(r).forEach((k) => {
+        if (!k.startsWith("__")) colSet.add(k);
+      })
+    );
+
+    const priority =
+      reportTypeKey === "cash_in"
+        ? ["date", "cash", "sales", "otherRevenue", "liability", "ownerCapital", "notes", "enteredBy"]
+        : reportTypeKey === "cash_out"
+        ? ["date", "cash", "utilities", "officeSupplies", "inventory", "liability", "ownerWithdrawal", "notes", "enteredBy"]
+        : [];
+
+    const detected = ["Detected Expenses", "Detected Assets"].filter((k) => colSet.has(k));
+    const others = [...colSet].filter((k) => !priority.includes(k) && !detected.includes(k));
+    const columns = [...priority.filter((k) => colSet.has(k)), ...others, ...detected];
+
+    const countDetected = (key) =>
+      rows.reduce(
+        (sum, r) => sum + (typeof r[key] === "string" ? r[key].split("|").filter(Boolean).length : 0),
+        0
+      );
+
+    const counters =
+      reportTypeKey === "cash_in"
+        ? { assets: countDetected("Detected Assets") }
+        : reportTypeKey === "cash_out"
+        ? { expenses: countDetected("Detected Expenses"), assets: countDetected("Detected Assets") }
+        : {};
+
+    return { rows, columns, counters };
+  };
+
+  // ▼ NEW: direct-upload helpers (not used in UI yet; kept for future)
   const ensureSE = () => {
     if (!selectedSE) {
       alert("Please select a Social Enterprise first.");
@@ -749,9 +1141,7 @@ const Reports = () => {
         headers: { "Content-Type": "multipart/form-data" },
       });
 
-      setUploadMsg(
-        data?.imported ? `✅ Imported ${data.imported} row(s).` : "✅ Import complete."
-      );
+      setUploadMsg(data?.imported ? `✅ Imported ${data.imported} row(s).` : "✅ Import complete.");
     } catch (err) {
       console.error("[upload] error:", err);
       setUploadMsg(`❌ ${err?.response?.data?.message || err.message || "Upload failed"}`);
@@ -767,6 +1157,39 @@ const Reports = () => {
     e.target.value = ""; // allow same-file reselect
   };
 
+  // --- Generate Financial Statement (UI only; backend should compute from stored cash_in/out/inventory) ---
+  const handleGenerateStatement = async () => {
+    if (!selectedSE) {
+      alert("Please select a Social Enterprise first.");
+      return;
+    }
+    if (!genMonth) {
+      alert("Please choose a month (YYYY-MM).");
+      return;
+    }
+
+    setGenLoading(true);
+    setGenMsg("");
+    setGenResult(null);
+
+    try {
+      // Expect backend route to compute and return derived statement for given month
+      // Body shape example: { se_id, month: 'YYYY-MM' }
+      const { data } = await axiosClient.post("/api/reports/generate-financial-statement", {
+        se_id: selectedSE,
+        month: genMonth,
+      });
+
+      setGenResult(data || {});
+      setGenMsg("✅ Statement generated.");
+    } catch (err) {
+      console.error("[generate] error:", err);
+      setGenMsg(`❌ ${err?.response?.data?.message || "Failed to generate statement."}`);
+    } finally {
+      setGenLoading(false);
+    }
+  };
+
   return (
     <Box m="20px">
       <Box display="flex" justifyContent="space-between" alignItems="center">
@@ -776,10 +1199,7 @@ const Reports = () => {
       {/* Dropdown on top */}
       <Box display="flex" flexDirection="column" alignItems="left" gap={4} mt={4}>
         <Box width="27%" bgcolor={colors.primary[400]} display="flex" padding={2} gap={2}>
-          <FormControl
-            fullWidth
-            sx={{ maxWidth: "500px", backgroundColor: colors.blueAccent[500] }}
-          >
+          <FormControl fullWidth sx={{ maxWidth: "500px", backgroundColor: colors.blueAccent[500] }}>
             <InputLabel id="se-select-label" sx={{ color: "white" }}>
               Select Social Enterprise
             </InputLabel>
@@ -796,7 +1216,7 @@ const Reports = () => {
             >
               {socialEnterprises.map((se) => (
                 <MenuItem key={se.se_id} value={se.se_id} sx={{ color: "white" }}>
-                  {se.abbr}
+                  {se.team_name} ({se.abbr})
                 </MenuItem>
               ))}
             </Select>
@@ -806,17 +1226,10 @@ const Reports = () => {
 
       {/* Upload Section */}
       <Box display="flex" flexDirection="column" alignItems="center" gap={4} mt={4}>
-        {/* B) Preview-first buttons with explicit hints */}
-        <Box
-          width="100%"
-          bgcolor={colors.primary[400]}
-          display="flex"
-          flexDirection="column"
-          gap={2}
-          p={2}
-        >
+        {/* Preview-first buttons with explicit hints */}
+        <Box width="100%" bgcolor={colors.primary[400]} display="flex" flexDirection="column" gap={2} p={2}>
           <Typography variant="h5" color={colors.greenAccent[500]}>
-            Or choose a specific type (Preview → Import)
+            Choose a specific type (Preview → Import)
           </Typography>
 
           <Box display="flex" gap={2} flexWrap="wrap">
@@ -826,13 +1239,12 @@ const Reports = () => {
               type="file"
               accept=".xlsx,.csv"
               hidden
-              onChange={(e) => { handleFileChange(e, "cash_in"); e.target.value = ""; }}
+              onChange={(e) => {
+                handleFileChange(e, "cash_in");
+                e.target.value = "";
+              }}
             />
-            <Button
-              variant="contained"
-              color="secondary"
-              onClick={() => document.getElementById("upload-cashin")?.click()}
-            >
+            <Button variant="contained" color="secondary" onClick={() => document.getElementById("upload-cashin")?.click()}>
               Upload Cash In
             </Button>
 
@@ -842,13 +1254,12 @@ const Reports = () => {
               type="file"
               accept=".xlsx,.csv"
               hidden
-              onChange={(e) => { handleFileChange(e, "cash_out"); e.target.value = ""; }}
+              onChange={(e) => {
+                handleFileChange(e, "cash_out");
+                e.target.value = "";
+              }}
             />
-            <Button
-              variant="contained"
-              color="secondary"
-              onClick={() => document.getElementById("upload-cashout")?.click()}
-            >
+            <Button variant="contained" color="secondary" onClick={() => document.getElementById("upload-cashout")?.click()}>
               Upload Cash Out
             </Button>
 
@@ -858,13 +1269,12 @@ const Reports = () => {
               type="file"
               accept=".xlsx,.csv"
               hidden
-              onChange={(e) => { handleFileChange(e, "inventory_report"); e.target.value = ""; }}
+              onChange={(e) => {
+                handleFileChange(e, "inventory_report");
+                e.target.value = "";
+              }}
             />
-            <Button
-              variant="contained"
-              color="secondary"
-              onClick={() => document.getElementById("upload-inventory")?.click()}
-            >
+            <Button variant="contained" color="secondary" onClick={() => document.getElementById("upload-inventory")?.click()}>
               Upload Inventory Report
             </Button>
 
@@ -872,86 +1282,142 @@ const Reports = () => {
             <input
               id="upload-workbook"
               type="file"
-              accept=".xlsx,.csv"  /* now accepts CSV too */
+              accept=".xlsx" // workbook must be xlsx to detect tabs
               hidden
-              onChange={(e) => { handleFileChange(e, "auto"); e.target.value = ""; }}
+              onChange={(e) => {
+                handleFileChange(e, "auto");
+                e.target.value = "";
+              }}
             />
-            <Button
-              variant="outlined"
-              color="inherit"
-              onClick={() => document.getElementById("upload-workbook")?.click()}
-            >
+            <Button variant="outlined" color="inherit" onClick={() => document.getElementById("upload-workbook")?.click()}>
               Upload Workbook (auto-extract tabs)
             </Button>
           </Box>
         </Box>
 
-        {/* Preview (kept) */}
+        {/* Preview */}
         {Object.keys(parsedData).length > 0 && (
           <Box mt={2} width="100%" bgcolor={colors.primary[400]} p={2}>
             <Typography variant="h4" color={colors.greenAccent[500]} mb={2}>
               Preview: {fileName}
             </Typography>
 
-            {Object.keys(parsedData).map((reportTypeKey) => (
-              <Box key={reportTypeKey} mb={4}>
-                <Typography variant="h5" color={colors.grey[100]} mb={1}>
-                  {formatTableName(reportTypeKey)} Data Preview (First 5 Rows)
-                </Typography>
-                <Box
-                  sx={{
-                    overflowX: "auto",
-                    maxHeight: "300px",
-                    border: "1px solid #ccc",
-                    borderRadius: "8px",
-                    padding: "10px",
-                  }}
-                >
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead>
-                      <tr>
-                        {parsedData[reportTypeKey] &&
-                          parsedData[reportTypeKey].length > 0 &&
-                          Object.keys(parsedData[reportTypeKey][0]).map((key) => (
-                            <th
-                              key={key}
-                              style={{
-                                border: "1px solid #ddd",
-                                padding: "8px",
-                                background: "#222",
-                                color: "#fff",
-                              }}
-                            >
-                              {key}
-                            </th>
-                          ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {parsedData[reportTypeKey] &&
-                        parsedData[reportTypeKey].slice(0, 5).map((row, index) => (
-                          <tr key={index}>
-                            {parsedData[reportTypeKey] &&
-                              parsedData[reportTypeKey].length > 0 &&
-                              Object.keys(parsedData[reportTypeKey][0]).map((key, i) => (
-                                <td
-                                  key={i}
-                                  style={{
-                                    border: "1px solid #ddd",
-                                    padding: "8px",
-                                    color: "#eee",
-                                  }}
-                                >
-                                  {row[key]}
-                                </td>
-                              ))}
+            {Object.keys(parsedData)
+              .filter((k) => Array.isArray(parsedData[k]) && parsedData[k].length > 0)
+              .map((reportTypeKey) => {
+                const { rows: previewRows, columns, counters } = buildPreviewRowsAndColumns(reportTypeKey, parsedData);
+
+                return (
+                  <Box key={reportTypeKey} mb={4}>
+                    <Typography variant="h5" color={colors.grey[100]} mb={0.5}>
+                      {formatTableName(reportTypeKey)} Data Preview (First 5 Rows)
+                    </Typography>
+
+                    {reportTypeKey === "cash_in" && (
+                      <Typography variant="body2" color={colors.grey[300]} mb={1}>
+                        Detected asset entries: <b>{counters.assets || 0}</b>
+                      </Typography>
+                    )}
+                    {reportTypeKey === "cash_out" && (
+                      <Typography variant="body2" color={colors.grey[300]} mb={1}>
+                        Detected expense entries: <b>{counters.expenses || 0}</b> · Detected asset entries: <b>{counters.assets || 0}</b>
+                      </Typography>
+                    )}
+
+                    <Box
+                      sx={{
+                        overflowX: "auto",
+                        maxHeight: "300px",
+                        border: "1px solid #ccc",
+                        borderRadius: "8px",
+                        p: "10px",
+                      }}
+                    >
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            {columns.map((key) => (
+                              <th
+                                key={key}
+                                style={{
+                                  border: "1px solid #ddd",
+                                  padding: "8px",
+                                  background: "#222",
+                                  color: "#fff",
+                                  position: "sticky",
+                                  top: 0,
+                                  zIndex: 1,
+                                }}
+                              >
+                                {key}
+                              </th>
+                            ))}
                           </tr>
-                        ))}
-                    </tbody>
-                  </table>
-                </Box>
-              </Box>
-            ))}
+                        </thead>
+                        <tbody>
+                          {previewRows.map((row, idx) => (
+                            <tr key={idx}>
+                              {columns.map((key) => {
+                                const isDetectedCol = key === "Detected Assets" || key === "Detected Expenses";
+                                const val = row[key];
+
+                                if (isDetectedCol) {
+                                  const parts =
+                                    typeof val === "string"
+                                      ? val
+                                          .split("|")
+                                          .map((s) => s.trim())
+                                          .filter(Boolean)
+                                      : [];
+                                  return (
+                                    <td key={key} style={{ border: "1px solid #ddd", padding: "8px", color: "#eee" }}>
+                                      {parts.length === 0 ? (
+                                        <span style={{ opacity: 0.6 }}>—</span>
+                                      ) : (
+                                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                          {parts.map((p, i) => (
+                                            <span
+                                              key={i}
+                                              style={{
+                                                fontSize: 12,
+                                                padding: "2px 6px",
+                                                borderRadius: 8,
+                                                background: "#2d2d2d",
+                                                border: "1px solid #444",
+                                              }}
+                                            >
+                                              {p}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </td>
+                                  );
+                                }
+
+                                const rendered =
+                                  val === undefined || val === null || val === "" ? (
+                                    <span style={{ opacity: 0.6 }}>—</span>
+                                  ) : typeof val === "object" ? (
+                                    JSON.stringify(val)
+                                  ) : (
+                                    val
+                                  );
+
+                                return (
+                                  <td key={key} style={{ border: "1px solid #ddd", padding: "8px", color: "#eee" }}>
+                                    {rendered}
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </Box>
+                  </Box>
+                );
+              })}
 
             <Box display="flex" gap={2} mt={2}>
               <Button
@@ -968,6 +1434,69 @@ const Reports = () => {
             </Box>
           </Box>
         )}
+
+        {/* --- Financial Statement Generation Section (UI ready) --- */}
+        <Box mt={2} width="100%" bgcolor={colors.primary[400]} p={2}>
+          <Typography variant="h4" color={colors.greenAccent[500]} mb={2}>
+            Generate Financial Statement (Derived)
+          </Typography>
+
+          <Typography variant="body2" color={colors.grey[300]} mb={2}>
+            This will compute the financial statement from your imported Cash In, Cash Out, and Inventory data.
+          </Typography>
+
+          <Box display="flex" gap={2} alignItems="center" flexWrap="wrap">
+            <TextField
+              label="Month"
+              type="month"
+              value={genMonth}
+              onChange={(e) => setGenMonth(e.target.value)}
+              sx={{
+                width: 220,
+                "& .MuiInputBase-input": { color: "white" },
+                "& .MuiFormLabel-root": { color: "white" },
+              }}
+              InputLabelProps={{ shrink: true }}
+            />
+            <Button
+              variant="contained"
+              color="secondary"
+              onClick={handleGenerateStatement}
+              disabled={!selectedSE || !genMonth || genLoading}
+            >
+              Generate
+            </Button>
+          </Box>
+
+          {genLoading && (
+            <Box mt={2}>
+              <LinearProgress />
+            </Box>
+          )}
+
+          {genMsg && (
+            <Typography variant="body2" color={genMsg.startsWith("✅") ? colors.greenAccent[400] : colors.redAccent[400]} mt={2}>
+              {genMsg}
+            </Typography>
+          )}
+
+          {genResult && (
+            <Box
+              mt={2}
+              sx={{
+                p: 2,
+                border: "1px solid #333",
+                borderRadius: 2,
+                bgcolor: "#1f1f1f",
+                color: "#ddd",
+                fontFamily: "monospace",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {JSON.stringify(genResult, null, 2)}
+            </Box>
+          )}
+        </Box>
       </Box>
     </Box>
   );
