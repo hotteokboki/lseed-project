@@ -298,7 +298,7 @@ const Reports = () => {
           const bomLines = [];
           const invReport = [];
 
-          let currentItem = null; // { item_name, item_price, item_beginning_inventory, item_less_count, bom_name }
+          let currentItem = null; // { item_name, item_price, item_beginning_inventory, item_less_count, bom_name, begin_unit_price, final_unit_price }
           const isHeaderRow = (txt) => txt.toLowerCase().startsWith("item name:");
           const isBeginning = (txt) =>
             txt.toLowerCase().startsWith("beginning inventory") ||
@@ -343,10 +343,18 @@ const Reports = () => {
             if (label === "") continue;
 
             if (isHeaderRow(label)) {
+              // flush previous item (with full month-scoped fields)
               if (currentItem) {
                 items.push(currentItem);
                 if (!isEmpty(globalReportDate)) {
-                  invReport.push({ month: globalReportDate, item_name: currentItem.item_name });
+                  invReport.push({
+                    month: globalReportDate,
+                    item_name: currentItem.item_name,
+                    begin_qty: currentItem.item_beginning_inventory ?? null,
+                    begin_unit_price: currentItem.begin_unit_price ?? currentItem.item_price ?? null,
+                    final_qty: currentItem.item_less_count ?? null,
+                    final_unit_price: currentItem.final_unit_price ?? null,
+                  });
                 }
               }
               const itemName = label.substring(label.indexOf(":") + 1).trim();
@@ -355,6 +363,8 @@ const Reports = () => {
                 item_price: null,
                 item_beginning_inventory: null,
                 item_less_count: null,
+                begin_unit_price: null,
+                final_unit_price: null,
                 bom_name: `${itemName} BOM`,
               };
               continue;
@@ -364,12 +374,16 @@ const Reports = () => {
 
             if (isBeginning(label)) {
               if (!isEmpty(qty)) currentItem.item_beginning_inventory = qty;
-              if (!isEmpty(price)) currentItem.item_price = price;
+              if (!isEmpty(price)) {
+                currentItem.item_price = price;        // keep for beginning
+                currentItem.begin_unit_price = price;  // explicit begin unit price
+              }
               continue;
             }
 
             if (isLessFinal(label)) {
               if (!isEmpty(qty)) currentItem.item_less_count = qty;
+              if (!isEmpty(price)) currentItem.final_unit_price = price; // ★ capture yellow price
               continue;
             }
 
@@ -391,11 +405,18 @@ const Reports = () => {
             }
           }
 
-          // Close last item
+          // Close last item (ensure full month-scoped record is pushed)
           if (currentItem) {
             items.push(currentItem);
             if (!isEmpty(globalReportDate)) {
-              invReport.push({ month: globalReportDate, item_name: currentItem.item_name });
+              invReport.push({
+                month: globalReportDate,
+                item_name: currentItem.item_name,
+                begin_qty: currentItem.item_beginning_inventory ?? null,
+                begin_unit_price: currentItem.begin_unit_price ?? currentItem.item_price ?? null,
+                final_qty: currentItem.item_less_count ?? null,
+                final_unit_price: currentItem.final_unit_price ?? null,
+              });
             }
           }
 
@@ -565,67 +586,59 @@ const Reports = () => {
               const enteredByValue = String(row[10] || "").trim();
               if (enteredByValue !== "") newRow["enteredBy"] = enteredByValue;
 
-              // ---- dynamic Assets for Cash In (no whitelists) ----
-              const meta = newParsedData.__cash_in_meta || { assetCols: [] };
-              if (meta.assetCols.length) {
+              // ---- dynamic Assets for Cash In (no whitelists; skip fixed to avoid dup) ----
+              const metaIn = newParsedData.__cash_in_meta || { assetCols: [] };
+              if (metaIn.assetCols.length) {
+                const SKIP_AST_IN = new Set(["raw materials", "cash (assets)", "savings"]);
                 const dynAst = {};
-                for (const { idx, label } of meta.assetCols) {
+                for (const { idx, label } of metaIn.assetCols) {
+                  const key = String(label || "").trim().toLowerCase();
+                  if (SKIP_AST_IN.has(key)) continue;
                   const v = parseNumericValue(row[idx]);
-                  if (v !== null) dynAst[label] = v;
+                  if (v !== null && v !== 0) dynAst[label] = v;
                 }
                 if (Object.keys(dynAst).length) newRow.__dynamicAssets = dynAst;
               }
             } else if (targetTable === "cash_out") {
               if (globalReportDate !== null) newRow["month"] = globalReportDate;
+
               const dateValue = String(row[0] || "").trim();
               if (dateValue !== "") newRow["date"] = dateValue;
 
+              // Cash stays in column 1 as before (works with the current template)
               const cash = parseNumericValue(row[1]);
               if (cash !== null) newRow["cash"] = cash;
 
-              // (legacy specific cols if present)
-              const utilities = parseNumericValue(row[3]);
-              if (utilities !== null) newRow["utilities"] = utilities;
-              const officeSupplies = parseNumericValue(row[4]);
-              if (officeSupplies !== null) newRow["officeSupplies"] = officeSupplies;
+              // -------- NO HARDCODED INDEXES: read whatever subheaders exist --------
+              const meta = newParsedData.__cash_out_meta || { expenseCols: [], assetCols: [] };
 
-              let totalExpenses = 0;
-              let hasAnyExpenseComponent = false;
-              if (utilities !== null) {
-                totalExpenses += utilities;
-                hasAnyExpenseComponent = true;
+              // Expenses: collect ALL non-zero columns under the "Expenses" band
+              if (meta.expenseCols.length) {
+                const ePairs = [];
+                for (const { idx, label } of meta.expenseCols) {
+                  const v = parseNumericValue(row[idx]);
+                  if (v !== null && v !== 0) ePairs.push([String(label).trim(), Number(v)]);
+                }
+                if (ePairs.length) {
+                  newRow.__dynamicExpenses = Object.fromEntries(ePairs);        // <-- will include "Utilities", "TRIAL", "TRIAL 2", etc.
+                  newRow.expenses = ePairs.reduce((s, [, v]) => s + v, 0);
+                }
               }
-              if (officeSupplies !== null) {
-                totalExpenses += officeSupplies;
-                hasAnyExpenseComponent = true;
-              }
-              if (totalExpenses !== 0) newRow["expenses"] = totalExpenses;
-              else if (hasAnyExpenseComponent) newRow["expenses"] = 0;
 
-              const cashUnderAssets = parseNumericValue(row[10]);
-              if (cashUnderAssets !== null) newRow["cashUnderAssets"] = cashUnderAssets;
-              const investments = parseNumericValue(row[11]);
-              if (investments !== null) newRow["investments"] = investments;
-              const savings = parseNumericValue(row[12]);
-              if (savings !== null) newRow["savings"] = savings;
+              // Assets: collect ALL non-zero columns under the "Assets" band
+              if (meta.assetCols.length) {
+                const aPairs = [];
+                for (const { idx, label } of meta.assetCols) {
+                  const v = parseNumericValue(row[idx]);
+                  if (v !== null && v !== 0) aPairs.push([String(label).trim(), Number(v)]);
+                }
+                if (aPairs.length) {
+                  newRow.__dynamicAssets = Object.fromEntries(aPairs);
+                  newRow.assets = aPairs.reduce((s, [, v]) => s + v, 0);
+                }
+              }
 
-              let totalAssets = 0;
-              let hasAnyAssetComponent = false;
-              if (cashUnderAssets !== null) {
-                totalAssets += cashUnderAssets;
-                hasAnyAssetComponent = true;
-              }
-              if (investments !== null) {
-                totalAssets += investments;
-                hasAnyAssetComponent = true;
-              }
-              if (savings !== null) {
-                totalAssets += savings;
-                hasAnyAssetComponent = true;
-              }
-              if (totalAssets !== 0) newRow["assets"] = totalAssets;
-              else if (hasAnyAssetComponent) newRow["assets"] = 0;
-
+              // Keep the special base buckets as-is (positions 13/14/15 in your sheet)
               const inventory = parseNumericValue(row[13]);
               if (inventory !== null) newRow["inventory"] = inventory;
               const liability = parseNumericValue(row[14]);
@@ -637,30 +650,6 @@ const Reports = () => {
               if (notesValue !== "") newRow["notes"] = notesValue;
               const enteredByValue = String(row[17] || "").trim();
               if (enteredByValue !== "") newRow["enteredBy"] = enteredByValue;
-
-              // ---- dynamic Expenses/Assets for Cash Out (no whitelists) ----
-              const meta = newParsedData.__cash_out_meta || {
-                expenseCols: [],
-                assetCols: [],
-              };
-
-              if (meta.expenseCols.length) {
-                const dynExp = {};
-                for (const { idx, label } of meta.expenseCols) {
-                  const v = parseNumericValue(row[idx]);
-                  if (v !== null) dynExp[label] = v;
-                }
-                if (Object.keys(dynExp).length) newRow.__dynamicExpenses = dynExp;
-              }
-
-              if (meta.assetCols.length) {
-                const dynAst = {};
-                for (const { idx, label } of meta.assetCols) {
-                  const v = parseNumericValue(row[idx]);
-                  if (v !== null) dynAst[label] = v;
-                }
-                if (Object.keys(dynAst).length) newRow.__dynamicAssets = dynAst;
-              }
             } else if (targetTable === "inventory_report") {
               if (globalReportDate !== null) newRow["month"] = globalReportDate;
 
@@ -854,88 +843,120 @@ const Reports = () => {
 
     const transactions = [];
     for (const r of rows) {
-      const baseHasAny =
-        r.cash != null ||
-        r.inventory != null ||
-        r.liability != null ||
-        r.ownerWithdrawal != null ||
-        (r.notes && r.notes !== "") ||
-        (r.enteredBy && r.enteredBy !== "");
+      const cash = r.cash ?? null;
 
-      if (baseHasAny) {
-        const base = {
-          transaction_date: r.date,
-          cash_amount: r.cash ?? null,
-          expense_id: null,
-          asset_id: null,
-          inventory_amount: r.inventory ?? null,
-          liability_amount: r.liability ?? null,
-          owners_withdrawal_amount: r.ownerWithdrawal ?? null,
-          note: r.notes ?? null,
-          entered_by: r.enteredBy ?? null,
-        };
-        transactions.push(base);
-      }
-
-      // Expense components -> cash_amount + expense_id/name
-      const expenseParts = [
-        { name: "Utilities", amt: r.utilities },
-        { name: "Office Supplies", amt: r.officeSupplies },
-      ].filter((p) => p.amt != null && p.amt !== 0);
-
+      // Gather dynamic bits up front
+      const expenseParts = [];
+      const addExp = (name, amt) => {
+        if (amt != null && amt !== 0) expenseParts.push({ name, amt: Number(amt) });
+      };
+      // legacy fixed columns (if present)
+      addExp("Utilities", r.utilities);
+      addExp("Office Supplies", r.officeSupplies);
       // dynamic expenses
       if (r.__dynamicExpenses) {
-        Object.entries(r.__dynamicExpenses).forEach(([label, amt]) => {
-          if (amt != null && amt !== 0) expenseParts.push({ name: label, amt });
-        });
+        Object.entries(r.__dynamicExpenses).forEach(([label, amt]) => addExp(label, amt));
       }
 
-      for (const e of expenseParts) {
-        const idFromMap = expenseMap?.[e.name.toLowerCase()];
-        const line = {
-          transaction_date: r.date,
-          cash_amount: e.amt,
-          expense_id: idFromMap || null,
-          expense_name: idFromMap ? undefined : e.name,
-          asset_id: null,
-          inventory_amount: null,
-          liability_amount: null,
-          owners_withdrawal_amount: null,
-          note: r.notes ?? null,
-          entered_by: r.enteredBy ?? null,
-        };
-        transactions.push(line);
-      }
-
-      // Asset components -> cash_amount + asset_id/name
-      const assetParts = [
-        { name: "Cash (Assets)", amt: r.cashUnderAssets },
-        { name: "Investments", amt: r.investments },
-        { name: "Savings", amt: r.savings },
-      ].filter((p) => p.amt != null && p.amt !== 0);
-
-      // dynamic assets
+      const assetParts = [];
+      const addAst = (name, amt) => {
+        if (amt != null && amt !== 0) assetParts.push({ name, amt: Number(amt) });
+      };
+      addAst("Cash (Assets)", r.cashUnderAssets);
+      addAst("Investments", r.investments);
+      addAst("Savings", r.savings);
       if (r.__dynamicAssets) {
-        Object.entries(r.__dynamicAssets).forEach(([label, amt]) => {
-          if (amt != null && amt !== 0) assetParts.push({ name: label, amt });
-        });
+        Object.entries(r.__dynamicAssets).forEach(([label, amt]) => addAst(label, amt));
       }
 
-      for (const a of assetParts) {
-        const idFromMap = assetMap?.[a.name.toLowerCase()];
-        const line = {
-          transaction_date: r.date,
-          cash_amount: a.amt,
-          expense_id: null,
-          asset_id: idFromMap || null,
-          asset_name: idFromMap ? undefined : a.name,
-          inventory_amount: null,
-          liability_amount: null,
-          owners_withdrawal_amount: null,
-          note: r.notes ?? null,
-          entered_by: r.enteredBy ?? null,
-        };
-        transactions.push(line);
+      const hasBaseSpecial =
+        r.inventory != null || r.liability != null || r.ownerWithdrawal != null;
+
+      // validate expense splits against cash
+      let useExpenseSplits = expenseParts.length > 0;
+      if (useExpenseSplits && typeof cash === "number") {
+        const sum = expenseParts.reduce((s, p) => s + p.amt, 0);
+        if (!(expenseParts.length === 1 || Math.abs(sum - cash) < 0.01)) {
+          // ambiguous → fall back to base for cash
+          useExpenseSplits = false;
+        }
+      }
+
+      const hasCashClassifiedSplits =
+        useExpenseSplits || (assetParts.length > 0 && cash != null);
+
+      if (hasCashClassifiedSplits) {
+        // 1) emit split rows that classify the cash
+        if (useExpenseSplits) {
+          for (const e of expenseParts) {
+            const id = expenseMap?.[e.name.toLowerCase()];
+            transactions.push({
+              transaction_date: r.date,
+              cash_amount: e.amt,
+              expense_id: id || null,
+              expense_name: id ? undefined : e.name,
+              asset_id: null,
+              inventory_amount: null,
+              liability_amount: null,
+              owners_withdrawal_amount: null,
+              note: r.notes ?? null,
+              entered_by: r.enteredBy ?? null,
+            });
+          }
+        }
+        for (const a of assetParts) {
+          const id = assetMap?.[a.name.toLowerCase()];
+          transactions.push({
+            transaction_date: r.date,
+            cash_amount: a.amt,
+            expense_id: null,
+            asset_id: id || null,
+            asset_name: id ? undefined : a.name,
+            inventory_amount: null,
+            liability_amount: null,
+            owners_withdrawal_amount: null,
+            note: r.notes ?? null,
+            entered_by: r.enteredBy ?? null,
+          });
+        }
+
+        // 2) if there are base-only special amounts, also emit ONE base row for them (cash null!)
+        if (hasBaseSpecial) {
+          transactions.push({
+            transaction_date: r.date,
+            cash_amount: null, // important: do not duplicate cash here
+            expense_id: null,
+            asset_id: null,
+            inventory_amount: r.inventory ?? null,
+            liability_amount: r.liability ?? null,
+            owners_withdrawal_amount: r.ownerWithdrawal ?? null,
+            note: r.notes ?? null,
+            entered_by: r.enteredBy ?? null,
+          });
+        }
+      } else {
+        // No valid splits → single base row
+        const baseHasAny =
+          cash != null ||
+          r.inventory != null ||
+          r.liability != null ||
+          r.ownerWithdrawal != null ||
+          (r.notes && r.notes !== "") ||
+          (r.enteredBy && r.enteredBy !== "");
+
+        if (baseHasAny) {
+          transactions.push({
+            transaction_date: r.date,
+            cash_amount: cash,
+            expense_id: null,
+            asset_id: null,
+            inventory_amount: r.inventory ?? null,
+            liability_amount: r.liability ?? null,
+            owners_withdrawal_amount: r.ownerWithdrawal ?? null,
+            note: r.notes ?? null,
+            entered_by: r.enteredBy ?? null,
+          });
+        }
       }
     }
 
@@ -959,9 +980,14 @@ const Reports = () => {
       if (parsedData.inventory_items || parsedData.inventory_bom_lines || parsedData.inventory_report) {
         const items = parsedData.inventory_items || [];
         const bom_lines = parsedData.inventory_bom_lines || [];
+        // ▲ keep month-scoped fields when linking
         const report_links = (parsedData.inventory_report || []).map((r) => ({
           month: r.month,
           item_name: r.item_name,
+          begin_qty: r.begin_qty ?? null,
+          begin_unit_price: r.begin_unit_price ?? null,
+          final_qty: r.final_qty ?? null,
+          final_unit_price: r.final_unit_price ?? null,
         }));
 
         const invPayload = { se_id: selectedSE, items, bom_lines, report_links };
@@ -1094,8 +1120,8 @@ const Reports = () => {
       reportTypeKey === "cash_in"
         ? ["date", "cash", "sales", "otherRevenue", "liability", "ownerCapital", "notes", "enteredBy"]
         : reportTypeKey === "cash_out"
-        ? ["date", "cash", "utilities", "officeSupplies", "inventory", "liability", "ownerWithdrawal", "notes", "enteredBy"]
-        : [];
+          ? ["date", "cash", "utilities", "officeSupplies", "inventory", "liability", "ownerWithdrawal", "notes", "enteredBy"]
+          : [];
 
     const detected = ["Detected Expenses", "Detected Assets"].filter((k) => colSet.has(k));
     const others = [...colSet].filter((k) => !priority.includes(k) && !detected.includes(k));
@@ -1111,8 +1137,8 @@ const Reports = () => {
       reportTypeKey === "cash_in"
         ? { assets: countDetected("Detected Assets") }
         : reportTypeKey === "cash_out"
-        ? { expenses: countDetected("Detected Expenses"), assets: countDetected("Detected Assets") }
-        : {};
+          ? { expenses: countDetected("Detected Expenses"), assets: countDetected("Detected Assets") }
+          : {};
 
     return { rows, columns, counters };
   };
@@ -1365,9 +1391,9 @@ const Reports = () => {
                                   const parts =
                                     typeof val === "string"
                                       ? val
-                                          .split("|")
-                                          .map((s) => s.trim())
-                                          .filter(Boolean)
+                                        .split("|")
+                                        .map((s) => s.trim())
+                                        .filter(Boolean)
                                       : [];
                                   return (
                                     <td key={key} style={{ border: "1px solid #ddd", padding: "8px", color: "#eee" }}>
