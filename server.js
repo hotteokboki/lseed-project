@@ -128,7 +128,7 @@ const {
   ALLOWED_COMM_MODES,
   filterAllowed,
 } = require("./utils/allowLists");
-const { getTopStarTrend } = require("./controllers/ratingsController.js");
+const { getTopStarTrend, getOverallCashFlow, getTopSellingItemsOverall, getInventoryTurnoverOverall, getFinanceRiskHeatmap } = require("./controllers/ratingsController.js");
 
 const app = express();
 
@@ -2957,6 +2957,76 @@ app.get("/api/ratings/top-star-trend", async (req, res) => {
     }
     console.error("Error fetching ratings:", error);
     return res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+app.get("/api/get-cash-flow-data", async (req, res) => {
+  try {
+    const from  = req.query.from  ?? null;  // "YYYY-MM-DD"
+    const to    = req.query.to    ?? null;  // END-EXCLUSIVE
+    const opening_cash = req.query.opening_cash ? Number(req.query.opening_cash) : 0;
+
+    const rows = await getOverallCashFlow({ from, to, opening_cash });
+    return res.json(Array.isArray(rows) ? rows : []);
+  } catch (e) {
+    console.error("GET /api/finance/cash-flow/overall error:", e);
+    return res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+app.get("/api/get-top-items-overall", async (req, res) => {
+  try {
+    const from   = req.query.from   ?? null;    // optional
+    const to     = req.query.to     ?? null;    // optional (end-exclusive)
+    const metric = req.query.metric ?? "value"; // "value" | "qty"
+
+    const rows = await getTopSellingItemsOverall({ from, to, metric });
+    res.json(Array.isArray(rows) ? rows : []);
+  } catch (e) {
+    console.error("GET /api/analytics/top-items-overall error:", e);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+app.get("/api/get-overall-inventory-turnover", async (req, res) => {
+  try {
+    const from = req.query.from ?? null; // "YYYY-MM-DD", optional
+    const to   = req.query.to   ?? null; // "YYYY-MM-DD", optional (end-exclusive)
+    const rows = await getInventoryTurnoverOverall({ from, to });
+    return res.json(Array.isArray(rows) ? rows : []);
+  } catch (e) {
+    console.error("GET /api/analytics/inventory-turnover error:", e);
+    return res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+app.get("/api/finance-risk-heatmap", async (req, res) => {
+  try {
+    const period = (req.query.period || "overall").toLowerCase();
+    const program = req.query.program || null;
+
+    // allow direct from/to OR derive from (period, quarter, year)
+    let from = req.query.from ?? null;
+    let to   = req.query.to   ?? null;
+
+    if (!from && !to && (period === "quarterly" || period === "yearly")) {
+      const year = parseInt(req.query.year, 10) || new Date().getFullYear();
+      if (period === "yearly") { from = `${year}-01-01`; to = `${year+1}-01-01`; }
+      if (period === "quarterly") {
+        const q = (req.query.quarter || "Q1").toUpperCase();
+        const r = (q === "Q1") ? {from:`${year}-01-01`, to:`${year}-04-01`} :
+                (q === "Q2") ? {from:`${year}-04-01`, to:`${year}-07-01`} :
+                (q === "Q3") ? {from:`${year}-07-01`, to:`${year}-10-01`} :
+                               {from:`${year}-10-01`, to:`${year+1}-01-01`};
+        from = r.from; to = r.to;
+      }
+    }
+
+    const rows = await getFinanceRiskHeatmap({ from, to, program });
+    res.json(rows);
+  } catch (e) {
+    console.error("GET /api/finance-risk-heatmap error:", e);
+    res.status(500).json({ message: "Failed to compute finance risk heatmap." });
   }
 });
 

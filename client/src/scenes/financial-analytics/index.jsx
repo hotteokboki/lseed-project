@@ -12,10 +12,12 @@ import React, { useEffect, useMemo, useState } from "react";
 import { DataGrid } from "@mui/x-data-grid";
 import { FormControl, InputLabel, Select, MenuItem } from "@mui/material";
 import MoneyOffOutlinedIcon from "@mui/icons-material/MoneyOffOutlined";
-import InventoryValuePie from "../../components/TotalInventoryPieChart.jsx";
+import TopSellingItemsPie from "../../components/TopSellingItems.jsx";
 import InventoryTurnoverBar from "../../components/InventoryTurnoverBarChart.jsx";
+import InventoryTurnoverTrend from "../../components/InventoryTurnoverTrend.jsx";
 import { useAuth } from "../../context/authContext";
 import axiosClient from "../../api/axiosClient.js";
+import FinanceRiskHeatmap from "../../components/FinanceRiskHeatMap.jsx";
 
 const FinancialAnalytics = ({ }) => {
   const theme = useTheme();
@@ -859,51 +861,24 @@ const FinancialAnalytics = ({ }) => {
         />
       </Box>
 
-      {/* Row 4 - Cash Flow Analysis */}
-      <Box
-        backgroundColor={colors.primary[400]}
-        p="20px"
-        paddingBottom={8}
-        mt="20px"
-      >
-        <Typography
-          variant="h3"
-          fontWeight="bold"
-          color={colors.greenAccent[500]}
-        >
-          Cash Flow Comparison (Inflow vs Outflow)
-        </Typography>
-        <Box height="400px">
-          <CashFlowBarChart data={cashFlowData} />
-        </Box>
+      {/* Row 4 - Cash Flow Analysis (Overall) */}
+      <Box backgroundColor={colors.primary[400]} p="20px" paddingBottom={8} mt="20px">
+        <CashFlowBarChart />
       </Box>
 
-      {/* Row 5 - Total Inventory Value by SE */}
+      {/* Row 5 - Top Selling Items (Overall) */}
       <Box backgroundColor={colors.primary[400]} p="20px" mt="20px">
-        <Typography
-          variant="h3"
-          fontWeight="bold"
-          color={colors.greenAccent[500]}
-        >
-          Total Inventory Value by Social Enterprise
-        </Typography>
-        <Box height="400px">
-          <InventoryValuePie data={inventoryValueData} />
-        </Box>
+        <TopSellingItemsPie />
       </Box>
 
-      {/* Row 6 - Inventory Turnover Ratio by SE */}
+      {/* Row 6 - Inventory Turnover (Overall) */}
       <Box backgroundColor={colors.primary[400]} p="20px" mt="20px">
-        <Typography
-          variant="h3"
-          fontWeight="bold"
-          color={colors.greenAccent[500]}
-        >
-          Inventory Turnover Ratio (Top 5)
-        </Typography>
-        <Box height="400px">
-          <InventoryTurnoverBar data={inventoryTurnoverData} />
-        </Box>
+        <InventoryTurnoverTrend />
+      </Box>
+
+      {/* Row 7 - Financial Heatmap */}
+      <Box backgroundColor={colors.primary[400]} p="20px" mt="20px">
+        <FinanceRiskHeatmap />
       </Box>
 
       {/* Row 7 - Inventory Turnover Ratio by SE */}
