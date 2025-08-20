@@ -7,7 +7,6 @@ import SocialEnterprise from "./scenes/socialenterprise";
 import Mentors from "./scenes/mentors";
 import Admin from "./scenes/admin";
 import ProgramPage from "./scenes/programs";
-import Analytics from "./scenes/analytics";
 import Reports from "./scenes/reports";
 import Scheduling from "./scenes/scheduling";
 import EvaluatePage from "./scenes/assess";
@@ -24,10 +23,10 @@ import LSEEDSignup from "./scenes/lseed-signup";
 import { GoogleOAuthProvider } from "@react-oauth/google";
 import ForgotPassword from "./scenes/forgotpassword";
 import ResetPassword from "./scenes/resetpassword";
-import FinancialAnalytics from "./scenes/financial-analytics";
 import PublicLayout from "./layouts/PublicLayout";
 import AppLayout from "./layouts/AppLayout";
 import CollaborationDashboard from "./scenes/collaborationdashboard";
+import AnalyticsHub from "./scenes/analytics-hub";
 
 const App = () => {
   const [theme, colorMode] = useMode();
@@ -122,8 +121,7 @@ const MainContent = () => {
           <Route path="/programs" element={<ProgramPage />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/evaluate" element={<EvaluatePage />} />
-          <Route path="/analytics" element={<Analytics />} />
-          <Route path="/financial-analytics" element={<FinancialAnalytics />} />
+          <Route path="/analytics" element={<AnalyticsHub />} />
         </Route>
 
         <Route element={<ProtectedRoute allowedRoles={["LSEED-Director", "LSEED-Coordinator", "Mentor"]} />}>

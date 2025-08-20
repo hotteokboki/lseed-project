@@ -690,7 +690,7 @@ const Analytics = ({}) => {
     <Box m="20px">
       {/* Header */}
       <Box display="flex" justifyContent="space-between" alignItems="center">
-        <Header title="Analytics" subtitle="Welcome to Analytics" />
+        <Header title="Evaluation Analytics" subtitle="Welcome to Evaluation Analytics" />
         {/* Right: Export Button */}
         <Button
           variant="contained"

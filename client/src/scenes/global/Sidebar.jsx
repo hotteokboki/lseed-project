@@ -106,7 +106,6 @@ const Sidebar = ({}) => {
       "/analytics-mentorship": "Show Analytics",
       "/programs": "Manage Programs",
       "/signup": "Register Mentor",
-      "/financial-analytics": "Financial Analytics",
       "/collaboration-dashboard": "Collaboration Portal",
     };
     return routeMap[location.pathname] || "Dashboard";
@@ -208,7 +207,7 @@ const Sidebar = ({}) => {
                   alt="profile-user"
                   width="90px"
                   height="90px"
-                  src="/assets/picture.png"
+                  src="../../dist/assets/Picture.png"
                   style={{
                     borderRadius: "50%",
                     border: `2px solid ${colors.grey[100]}`,
@@ -285,16 +284,9 @@ const Sidebar = ({}) => {
                   setSelected={setSelected}
                 />
                 <Item
-                  title="Evaluation Analytics"
+                  title="Analytics Hub"
                   to="/analytics"
                   icon={<AnalyticsOutlinedIcon />}
-                  selected={selected}
-                  setSelected={setSelected}
-                />
-                <Item
-                  title="Financial Analytics"
-                  to="/financial-analytics"
-                  icon={<AccountBalanceOutlinedIcon />}
                   selected={selected}
                   setSelected={setSelected}
                 />
