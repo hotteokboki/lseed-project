@@ -98,7 +98,7 @@ exports.assignProgramCoordinator = async (program_id, user_id) => {
 exports.getProgramAssignment = async (user_id) => {
   try {
     const query = `
-      SELECT p.name FROM program_assignment AS pa
+      SELECT p.program_id, p.name FROM program_assignment AS pa
       JOIN users AS u ON u.user_id = pa.user_id
       JOIN programs AS p ON pa.program_id = p.program_id
       WHERE pa.user_id = $1;

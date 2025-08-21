@@ -128,7 +128,7 @@ const {
   ALLOWED_COMM_MODES,
   filterAllowed,
 } = require("./utils/allowLists");
-const { getTopStarTrend, getOverallCashFlow, getTopSellingItemsOverall, getInventoryTurnoverOverall, getFinanceRiskHeatmap } = require("./controllers/ratingsController.js");
+const { getTopStarTrend, getOverallCashFlow, getTopSellingItemsOverall, getInventoryTurnoverOverall, getFinanceRiskHeatmap, getFinanceKPIs, getMonthlyCapitalFlows, getMonthlyNetCash, getRevenueSeasonality } = require("./controllers/ratingsController.js");
 
 const app = express();
 
@@ -2943,17 +2943,21 @@ app.get("/api/get-all-social-enterprises", async (req, res) => {
 
 app.get("/api/ratings/top-star-trend", async (req, res) => {
   try {
-    const from  = req.query.from  ?? null;   // "YYYY-MM-DD"
-    const to    = req.query.to    ?? null;   // "YYYY-MM-DD" (end-exclusive)
-    const se_id = req.query.se_id ?? null;
+    const from        = req.query.from        ?? null; // "YYYY-MM-DD"
+    const to          = req.query.to          ?? null; // "YYYY-MM-DD" (end-exclusive)
+    const se_id       = req.query.se_id       ?? null; // optional UUID
+    const program_id  = req.query.program_id  ?? null; // optional UUID
 
-    const rows = await getTopStarTrend({ from, to, se_id });
+    const rows = await getTopStarTrend({ from, to, se_id, program_id });
 
     // Return [] so the UI can show “No data to display.”
     return res.json(Array.isArray(rows) ? rows : []);
   } catch (error) {
     if (error?.message === "INVALID_SE_ID") {
       return res.status(400).json({ message: "Invalid se_id" });
+    }
+    if (error?.message === "INVALID_PROGRAM_ID") {
+      return res.status(400).json({ message: "Invalid program_id" });
     }
     console.error("Error fetching ratings:", error);
     return res.status(500).json({ message: "Internal Server Error" });
@@ -2962,50 +2966,106 @@ app.get("/api/ratings/top-star-trend", async (req, res) => {
 
 app.get("/api/get-cash-flow-data", async (req, res) => {
   try {
-    const from  = req.query.from  ?? null;  // "YYYY-MM-DD"
-    const to    = req.query.to    ?? null;  // END-EXCLUSIVE
+    const from         = req.query.from ?? null;       // "YYYY-MM-DD" (start)
+    const to           = req.query.to ?? null;         // end-exclusive
     const opening_cash = req.query.opening_cash ? Number(req.query.opening_cash) : 0;
+    const program_id   = req.query.program_id ?? null; // (uuid)
+    const se_id        = req.query.se_id ?? null;      // (uuid)
 
-    const rows = await getOverallCashFlow({ from, to, opening_cash });
+    const rows = await getOverallCashFlow({ from, to, opening_cash, program_id, se_id });
     return res.json(Array.isArray(rows) ? rows : []);
   } catch (e) {
-    console.error("GET /api/finance/cash-flow/overall error:", e);
+    console.error("GET /api/get-cash-flow-data error:", e);
     return res.status(500).json({ message: "Internal Server Error" });
   }
 });
 
 app.get("/api/get-top-items-overall", async (req, res) => {
   try {
-    const from   = req.query.from   ?? null;    // optional
-    const to     = req.query.to     ?? null;    // optional (end-exclusive)
-    const metric = req.query.metric ?? "value"; // "value" | "qty"
+    const q = req.query || {};
+    const includeMeta =
+      String(q.include_meta ?? "").toLowerCase() === "1" ||
+      String(q.include_meta ?? "").toLowerCase() === "true";
 
-    const rows = await getTopSellingItemsOverall({ from, to, metric });
-    res.json(Array.isArray(rows) ? rows : []);
+    const result = await getTopSellingItemsOverall({
+      from: q.from ?? null,
+      to: q.to ?? null,
+      metric: q.metric ?? "value",
+      program_id: q.program_id ?? null,
+      se_id: q.se_id ?? null,
+      include_meta: includeMeta,
+    });
+
+    // Keep backward compatibility with array-only consumers
+    if (includeMeta) return res.json(result);
+    return res.json(Array.isArray(result) ? result : (result.rows ?? []));
   } catch (e) {
-    console.error("GET /api/analytics/top-items-overall error:", e);
-    res.status(500).json({ message: "Internal Server Error" });
+    console.error("GET /api/get-top-items-overall error:", e);
+    return res.status(500).json({ message: "Internal Server Error" });
   }
 });
 
 app.get("/api/get-overall-inventory-turnover", async (req, res) => {
   try {
-    const from = req.query.from ?? null; // "YYYY-MM-DD", optional
-    const to   = req.query.to   ?? null; // "YYYY-MM-DD", optional (end-exclusive)
-    const rows = await getInventoryTurnoverOverall({ from, to });
+    const from        = req.query.from ?? null;            // optional "YYYY-MM-DD"
+    const to          = req.query.to ?? null;              // optional (END-EXCLUSIVE)
+    const program_id  = req.query.program_id ?? null;      // optional UUID
+    const se_id       = req.query.se_id ?? null;           // optional UUID
+
+    const rows = await getInventoryTurnoverOverall({ from, to, program_id, se_id });
     return res.json(Array.isArray(rows) ? rows : []);
   } catch (e) {
-    console.error("GET /api/analytics/inventory-turnover error:", e);
+    console.error("GET /api/get-overall-inventory-turnover error:", e);
     return res.status(500).json({ message: "Internal Server Error" });
   }
 });
 
+// GET /api/finance-risk-heatmap
 app.get("/api/finance-risk-heatmap", async (req, res) => {
   try {
+    // Support direct from/to OR derive from (period, year, quarter) for backward-compat
     const period = (req.query.period || "overall").toLowerCase();
+    let from = req.query.from ?? null;
+    let to   = req.query.to   ?? null;
+
+    if (!from && !to && (period === "quarterly" || period === "yearly")) {
+      const year = parseInt(req.query.year, 10) || new Date().getFullYear();
+      if (period === "yearly") { from = `${year}-01-01`; to = `${year + 1}-01-01`; }
+      if (period === "quarterly") {
+        const q = (req.query.quarter || "Q1").toUpperCase();
+        const r = (q === "Q1") ? { from: `${year}-01-01`, to: `${year}-04-01` } :
+                (q === "Q2") ? { from: `${year}-04-01`, to: `${year}-07-01` } :
+                (q === "Q3") ? { from: `${year}-07-01`, to: `${year}-10-01` } :
+                               { from: `${year}-10-01`, to: `${year + 1}-01-01` };
+        from = r.from; to = r.to;
+      }
+    }
+
+    const result = await getFinanceRiskHeatmap({
+      from,
+      to,
+      program_id: req.query.program_id ?? null,  // coordinator scope
+      se_id:      req.query.se_id ?? null,       // specific SE scope
+    });
+
+    res.json(result);
+  } catch (e) {
+    if (e?.message === "INVALID_PROGRAM_ID") {
+      return res.status(400).json({ message: "Invalid program_id" });
+    }
+    if (e?.message === "INVALID_SE_ID") {
+      return res.status(400).json({ message: "Invalid se_id" });
+    }
+    console.error("GET /api/finance-risk-heatmap error:", e);
+    res.status(500).json({ message: "Failed to compute finance risk heatmap." });
+  }
+});
+
+app.get("/api/finance-kpis", async (req, res) => {
+  try {
+    const period  = (req.query.period || "overall").toLowerCase();
     const program = req.query.program || null;
 
-    // allow direct from/to OR derive from (period, quarter, year)
     let from = req.query.from ?? null;
     let to   = req.query.to   ?? null;
 
@@ -3014,19 +3074,76 @@ app.get("/api/finance-risk-heatmap", async (req, res) => {
       if (period === "yearly") { from = `${year}-01-01`; to = `${year+1}-01-01`; }
       if (period === "quarterly") {
         const q = (req.query.quarter || "Q1").toUpperCase();
-        const r = (q === "Q1") ? {from:`${year}-01-01`, to:`${year}-04-01`} :
-                (q === "Q2") ? {from:`${year}-04-01`, to:`${year}-07-01`} :
-                (q === "Q3") ? {from:`${year}-07-01`, to:`${year}-10-01`} :
-                               {from:`${year}-10-01`, to:`${year+1}-01-01`};
-        from = r.from; to = r.to;
+        ({ from, to } =
+          q === "Q1" ? { from: `${year}-01-01`, to: `${year}-04-01` } :
+          q === "Q2" ? { from: `${year}-04-01`, to: `${year}-07-01` } :
+          q === "Q3" ? { from: `${year}-07-01`, to: `${year}-10-01` } :
+                       { from: `${year}-10-01`, to: `${year+1}-01-01` });
       }
     }
 
-    const rows = await getFinanceRiskHeatmap({ from, to, program });
-    res.json(rows);
+    const data = await getFinanceKPIs({ from, to, program });
+    res.json(data);
   } catch (e) {
-    console.error("GET /api/finance-risk-heatmap error:", e);
-    res.status(500).json({ message: "Failed to compute finance risk heatmap." });
+    console.error("GET /api/finance-kpis error:", e);
+    res.status(500).json({ message: "Failed to compute finance KPIs." });
+  }
+});
+
+app.get("/api/finance/monthly-capital-flows", async (req, res) => {
+  try {
+    const from       = req.query.from ?? null;         // "YYYY-MM-DD"
+    const to         = req.query.to ?? null;           // "YYYY-MM-DD" (END-EXCLUSIVE)
+    const program_id = req.query.program_id ?? null;   // optional UUID (coordinator)
+    const se_id      = req.query.se_id ?? null;        // optional UUID (specific SE)
+
+    const rows = await getMonthlyCapitalFlows({ from, to, program_id, se_id });
+    return res.json(Array.isArray(rows) ? rows : []);
+  } catch (e) {
+    if (e?.message === "INVALID_PROGRAM_ID") {
+      return res.status(400).json({ message: "Invalid program_id" });
+    }
+    if (e?.message === "INVALID_SE_ID") {
+      return res.status(400).json({ message: "Invalid se_id" });
+    }
+    console.error("GET /api/finance/monthly-capital-flows error:", e);
+    return res.status(500).json({ message: "Failed to load capital flows" });
+  }
+});
+
+app.get("/api/finance/monthly-net-cash", async (req, res) => {
+  try {
+    const data = await getMonthlyNetCash({
+      from:       req.query.from ?? null,
+      to:         req.query.to ?? null,
+      program_id: req.query.program_id ?? null,
+      se_id:      req.query.se_id ?? null,
+    });
+    res.json(data);
+  } catch (e) {
+    console.error("monthly-net-cash error:", e);
+    res.status(500).json({ message: "Failed to load net cash" });
+  }
+});
+
+app.get("/api/finance/revenue-seasonality", async (req, res) => {
+  try {
+    const rows = await getRevenueSeasonality({
+      from:       req.query.from ?? null,
+      to:         req.query.to ?? null,
+      program_id: req.query.program_id ?? null,
+      se_id:      req.query.se_id ?? null,
+    });
+    res.json(Array.isArray(rows) ? rows : []);
+  } catch (e) {
+    if (e?.message === "INVALID_PROGRAM_ID") {
+      return res.status(400).json({ message: "Invalid program_id" });
+    }
+    if (e?.message === "INVALID_SE_ID") {
+      return res.status(400).json({ message: "Invalid se_id" });
+    }
+    console.error("GET /api/finance/revenue-seasonality error:", e);
+    res.status(500).json({ message: "Failed to load revenue seasonality." });
   }
 });
 

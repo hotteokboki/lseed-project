@@ -28,7 +28,6 @@ const SEPerformanceTrendChart = ({ selectedSEId = null }) => {
   const SEsPerPage = 5;
   const { user } = useAuth();
   const isCoordinator = user?.roles?.includes("LSEED-Coordinator");
-  const isMentor = user?.roles?.includes("Mentor");
 
   useEffect(() => {
     const fetchTopPerformers = async () => {

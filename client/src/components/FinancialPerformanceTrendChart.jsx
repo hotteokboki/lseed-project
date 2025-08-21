@@ -15,10 +15,9 @@ import { ResponsiveLine } from "@nivo/line";
 import { useTheme } from "@mui/material";
 import { tokens } from "../theme";
 import axiosClient from "../api/axiosClient";
+import { useAuth } from "../context/authContext";
 
 const SEsPerPage = 5;
-
-const pad2 = (n) => String(n).padStart(2, "0");
 
 // Map quarter -> { from, to } (to is END-EXCLUSIVE)
 const quarterRange = (year, q) => {
@@ -27,97 +26,208 @@ const quarterRange = (year, q) => {
     case "Q2": return { from: `${year}-04-01`, to: `${year}-07-01` };
     case "Q3": return { from: `${year}-07-01`, to: `${year}-10-01` };
     case "Q4": return { from: `${year}-10-01`, to: `${Number(year) + 1}-01-01` };
-    default:   return { from: null, to: null };
+    default: return { from: null, to: null };
   }
 };
 
 const FinancialPerformanceTrendChart = ({
   isDashboard = false,
+  selectedSEId = null, // optional: non-coordinator can scope to a specific SE
 }) => {
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
+  const { user } = useAuth();
+  const isCoordinator = user?.roles?.includes("LSEED-Coordinator");
 
+  // Local UI state
   const [rows, setRows] = useState([]);
   const [labels, setLabels] = useState({});
   const [loading, setLoading] = useState(true);
+  const [errMsg, setErrMsg] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
 
-  // --- Period selection state (like your other chart) ---
-  const now = new Date();
-  const defaultYear = now.getFullYear();
+  // Period selection
   const [periodMode, setPeriodMode] = useState("overall"); // overall | quarterly | yearly
   const [selectedQuarter, setSelectedQuarter] = useState("Q1");
-  const [selectedYear, setSelectedYear] = useState(defaultYear);
-  // quick year options (current ± 3)
-  const yearOptions = Array.from({ length: 7 }, (_, i) => defaultYear - 3 + i);
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
 
-  // fetch SE labels (abbr/team_name)
+  // Dynamic availability (derived from all reports for the current scope)
+  const [availYears, setAvailYears] = useState([]); // e.g., [2023, 2024, 2025]
+  const [availQuartersByYear, setAvailQuartersByYear] = useState({}); // { 2025: ["Q1","Q2"] }
+  const [availabilityLoading, setAvailabilityLoading] = useState(true);
+
+  // Load SE labels once
   useEffect(() => {
+    let alive = true;
     (async () => {
       try {
         const { data } = await axiosClient.get("/api/get-all-social-enterprises");
+        if (!alive) return;
         const m = {};
-        for (const se of data || []) {
-          m[se.se_id] = se.abbr || se.team_name || se.se_id;
-        }
+        for (const se of data || []) m[se.se_id] = se.abbr || se.team_name || se.se_id;
         setLabels(m);
       } catch (e) {
+        if (!alive) return;
         console.warn("labels load failed:", e?.response?.data || e.message);
       }
     })();
+    return () => { alive = false; };
   }, []);
 
-  // Compute from/to based on period selection
+  // If coordinator, fetch their program_id once
+  const [programId, setProgramId] = useState(null);
+  const [programLoading, setProgramLoading] = useState(isCoordinator);
+  useEffect(() => {
+    if (!isCoordinator) return;
+    let alive = true;
+    (async () => {
+      setProgramLoading(true);
+      try {
+        const resp = await axiosClient.get("/api/get-program-coordinator");
+        if (!alive) return;
+        const pid = resp?.data?.[0]?.program_id ?? null;
+        setProgramId(pid);
+      } catch (e) {
+        if (!alive) return;
+        console.error("load coordinator program:", e?.response?.data || e.message);
+        setProgramId(null);
+      } finally {
+        if (alive) setProgramLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [isCoordinator]);
+
+  // Build availability (years/quarters) for current scope (portfolio / program / selected SE)
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        setAvailabilityLoading(true);
+        if (isCoordinator && programLoading) return; // wait for program id
+
+        const params = {};
+        if (!isCoordinator && selectedSEId) params.se_id = selectedSEId;
+        else if (isCoordinator && programId) params.program_id = programId;
+        // no from/to => get all rows for scope
+        const resp = await axiosClient.get("/api/ratings/top-star-trend", { params });
+        if (!alive) return;
+
+        const all = Array.isArray(resp?.data) ? resp.data : [];
+        const yearsSet = new Set();
+        const quartersMap = new Map(); // year -> Set("Q1"...)
+
+        for (const r of all) {
+          const d = new Date(r.month);
+          if (isNaN(d)) continue;
+          const y = d.getFullYear();
+          const qNum = Math.floor(d.getMonth() / 3) + 1; // 1..4
+          yearsSet.add(y);
+          if (!quartersMap.has(y)) quartersMap.set(y, new Set());
+          quartersMap.get(y).add(`Q${qNum}`);
+        }
+
+        const ys = Array.from(yearsSet).sort((a, b) => b - a); // latest first
+        const qbj = {};
+        ys.forEach(y => {
+          qbj[y] = Array.from(quartersMap.get(y) || []).sort(
+            (a, b) => Number(a.slice(1)) - Number(b.slice(1))
+          );
+        });
+
+        setAvailYears(ys);
+        setAvailQuartersByYear(qbj);
+
+        // keep selectedYear/Quarter valid for the new availability
+        if (ys.length && !ys.includes(selectedYear)) {
+          setSelectedYear(ys[0]); // default to latest available year
+        }
+        if (periodMode === "quarterly") {
+          const qs = qbj[ys.includes(selectedYear) ? selectedYear : ys[0]] || [];
+          if (qs.length && !qs.includes(selectedQuarter)) setSelectedQuarter(qs[0]);
+        }
+      } catch (e) {
+        console.error("load availability:", e?.response?.data || e.message);
+        setAvailYears([]);
+        setAvailQuartersByYear({});
+      } finally {
+        if (alive) setAvailabilityLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [isCoordinator, programId, programLoading, selectedSEId, periodMode, selectedYear, selectedQuarter]);
+
+  // When switching period, auto-pick latest available year & valid quarter
+  useEffect(() => {
+    if ((periodMode === "yearly" || periodMode === "quarterly") && availYears.length) {
+      if (!availYears.includes(selectedYear)) setSelectedYear(availYears[0]);
+    }
+  }, [periodMode, availYears, selectedYear]);
+
+  useEffect(() => {
+    if (periodMode === "quarterly") {
+      const qs = availQuartersByYear[selectedYear] || [];
+      if (qs.length && !qs.includes(selectedQuarter)) setSelectedQuarter(qs[0]);
+    }
+  }, [periodMode, selectedYear, availQuartersByYear, selectedQuarter]);
+
+  // Compute from/to based on period UI
   const { from, to, periodLabel } = useMemo(() => {
     if (periodMode === "overall") {
       return { from: null, to: null, periodLabel: "Overall" };
     }
     if (periodMode === "yearly") {
       const y = selectedYear;
-      return {
-        from: `${y}-01-01`,
-        to: `${Number(y) + 1}-01-01`, // end-exclusive
-        periodLabel: `Year ${y}`,
-      };
+      return { from: `${y}-01-01`, to: `${Number(y) + 1}-01-01`, periodLabel: `Year ${y}` };
     }
-    // quarterly
-    const { from, to } = quarterRange(selectedYear, selectedQuarter);
-    return { from, to, periodLabel: `${selectedYear} ${selectedQuarter}` };
-  }, [periodMode, selectedYear, selectedQuarter]);
+    const r = quarterRange(selectedYear, selectedQuarter);
+    return { ...r, periodLabel: `${selectedYear} ${selectedQuarter}` };
+  }, [periodMode, selectedQuarter, selectedYear]);
 
-  // fetch star trend rows (monthly)
+  // Fetch star-trend rows whenever period or filters change
   useEffect(() => {
+    let alive = true;
     setLoading(true);
+    setErrMsg("");
     setRows([]);
     setCurrentPage(0);
 
     (async () => {
       try {
-        const params = {};
-        if (from) params.from = from;
-        if (to)   params.to   = to;
+        if (isCoordinator && programLoading) return;
 
-        // [{ se_id, month, stars_half, score_0_100 }, ...]
-        const { data } = await axiosClient.get("/api/ratings/top-star-trend", { params });
+        const baseParams = {};
+        if (from) baseParams.from = from;
+        if (to) baseParams.to = to;
+
+        let params = { ...baseParams };
+        if (!isCoordinator && selectedSEId) params.se_id = selectedSEId;
+        else if (isCoordinator && programId) params.program_id = programId;
+
+        const resp = await axiosClient.get("/api/ratings/top-star-trend", { params });
+        const data = resp?.data;
+        if (!alive) return;
         setRows(Array.isArray(data) ? data : []);
       } catch (e) {
         console.error("load star trend:", e?.response?.data || e.message);
+        setErrMsg("Failed to load chart data.");
         setRows([]);
       } finally {
-        setLoading(false);
+        if (alive) setLoading(false);
       }
     })();
-  }, [from, to]);
 
-  // Build series (group by se_id), sort months, compute union of all months for domain
+    return () => { alive = false; };
+  }, [from, to, isCoordinator, programId, programLoading, selectedSEId]);
+
+  // Build series (group by se_id), sort months, compute x-domain
   const { seriesAll, monthDomain } = useMemo(() => {
     const bySE = new Map();
     const monthsSet = new Set();
 
     const monthKey = (v) => {
       if (typeof v === "string") return v.slice(0, 7); // "YYYY-MM"
-      if (v instanceof Date) return v.toISOString().slice(0, 7);
       try { return new Date(v).toISOString().slice(0, 7); } catch { return String(v ?? "").slice(0, 7); }
     };
 
@@ -135,16 +245,10 @@ const FinancialPerformanceTrendChart = ({
     const seriesAll = Array.from(bySE.entries()).map(([se_id, pts]) => {
       pts.sort((a, b) => a.x.localeCompare(b.x));
       const avg = pts.length ? pts.reduce((s, p) => s + (p.y || 0), 0) / pts.length : 0;
-      return {
-        se_id,
-        id: labels[se_id] || se_id.slice(0, 6),
-        color: undefined,
-        data: pts,
-        _avg: avg,
-      };
+      return { se_id, id: labels[se_id] || se_id.slice(0, 6), color: undefined, data: pts, _avg: avg };
     });
 
-    // rank by average (desc) so “Top 5” uses best lines
+    // Rank by avg desc to prioritize best lines in Top 5
     seriesAll.sort((a, b) => b._avg - a._avg);
 
     const monthDomain = Array.from(monthsSet).sort((a, b) => a.localeCompare(b));
@@ -159,26 +263,36 @@ const FinancialPerformanceTrendChart = ({
     return seriesAll.slice(start, start + SEsPerPage);
   }, [seriesAll, showAll, currentPage]);
 
-  const minY = 0;
-  const maxY = 5;
+  // --- Clear Filters: show ONLY when there are changes from defaults ---
+  // Defaults: periodMode="overall", showAll=false, currentPage=0
+  const isDefaultFilters = periodMode === "overall" && !showAll && currentPage === 0;
+  const handleClearFilters = () => {
+    setPeriodMode("overall");
+    setShowAll(false);
+    setCurrentPage(0);
+    // (Year/Quarter will auto-adjust when user switches mode)
+  };
+
+  const controlsDisabled = loading || availabilityLoading || (isCoordinator && programLoading);
 
   return (
     <Box gridColumn="span 12" gridRow="span 2" backgroundColor={colors.primary[400]} p="20px">
-      {/* Header: title + tooltip + controls */}
+      {/* Header */}
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
         <Box display="flex" alignItems="center">
           <Box>
             <Typography variant="h3" fontWeight="bold" color={colors.greenAccent[500]}>
-              {loading
-                ? "Loading…"
-                : seriesAll.length === 0
-                ? "No Data"
-                : `Financial Performance Trend (${showAll ? "All" : "Top 5"})`}
+              {`Financial Performance Trend (${showAll ? "All" : "Top 5"})`}
             </Typography>
             {!loading && (
               <Typography variant="h6" color={colors.grey[300]} mt={0.5}>
                 Stars (0–5, half-steps) per month — derived from composite scores
                 {periodLabel ? ` • ${periodLabel}` : ""}
+              </Typography>
+            )}
+            {errMsg && (
+              <Typography variant="caption" color="#f44336" display="block" mt={0.5}>
+                {errMsg}
               </Typography>
             )}
           </Box>
@@ -206,20 +320,17 @@ const FinancialPerformanceTrendChart = ({
           </Tooltip>
         </Box>
 
-        {/* Right controls: Period + (Quarter/Year) + Show All */}
+        {/* Right controls: Period + (Quarter/Year) + Show All + Clear Filters (conditional) */}
         <Box display="flex" alignItems="center" gap={1}>
-          {/* Period mode */}
+
           <Select
             value={periodMode}
             onChange={(e) => setPeriodMode(e.target.value)}
-            disabled={loading}
+            disabled={controlsDisabled}
             sx={{
-              height: 40,
-              minWidth: 130,
-              backgroundColor: loading ? colors.grey[600] : colors.blueAccent[600],
-              color: colors.grey[100],
-              borderColor: colors.grey[100],
-              fontWeight: "bold",
+              height: 40, minWidth: 130,
+              backgroundColor: controlsDisabled ? colors.grey[600] : colors.blueAccent[600],
+              color: colors.grey[100], fontWeight: "bold",
               "& .MuiSelect-icon": { color: colors.grey[100] },
               "& fieldset": { border: "none" },
             }}
@@ -229,79 +340,105 @@ const FinancialPerformanceTrendChart = ({
             <MenuItem value="yearly">Yearly</MenuItem>
           </Select>
 
-          {/* Quarter select (only when quarterly) */}
           {periodMode === "quarterly" && (
-            <Select
-              value={selectedQuarter}
-              onChange={(e) => setSelectedQuarter(e.target.value)}
-              disabled={loading}
-              sx={{
-                height: 40,
-                minWidth: 100,
-                backgroundColor: loading ? colors.grey[600] : colors.blueAccent[600],
-                color: colors.grey[100],
-                borderColor: colors.grey[100],
-                fontWeight: "bold",
-                "& .MuiSelect-icon": { color: colors.grey[100] },
-                "& fieldset": { border: "none" },
-              }}
-            >
-              <MenuItem value="Q1">Q1</MenuItem>
-              <MenuItem value="Q2">Q2</MenuItem>
-              <MenuItem value="Q3">Q3</MenuItem>
-              <MenuItem value="Q4">Q4</MenuItem>
-            </Select>
+            <>
+              <Select
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(e.target.value)}
+                disabled={controlsDisabled}
+                sx={{
+                  height: 40, minWidth: 110,
+                  backgroundColor: controlsDisabled ? colors.grey[600] : colors.blueAccent[600],
+                  color: colors.grey[100], fontWeight: "bold",
+                  "& .MuiSelect-icon": { color: colors.grey[100] },
+                  "& fieldset": { border: "none" },
+                }}
+              >
+                {(availYears.length ? availYears : [selectedYear]).map((y) => (
+                  <MenuItem key={y} value={y}>{y}</MenuItem>
+                ))}
+              </Select>
+
+              <Select
+                value={selectedQuarter}
+                onChange={(e) => setSelectedQuarter(e.target.value)}
+                disabled={controlsDisabled}
+                sx={{
+                  height: 40, minWidth: 100,
+                  backgroundColor: controlsDisabled ? colors.grey[600] : colors.blueAccent[600],
+                  color: colors.grey[100], fontWeight: "bold",
+                  "& .MuiSelect-icon": { color: colors.grey[100] },
+                  "& fieldset": { border: "none" },
+                }}
+              >
+                {(availQuartersByYear[selectedYear]?.length
+                  ? availQuartersByYear[selectedYear]
+                  : ["Q1", "Q2", "Q3", "Q4"]
+                ).map((q) => (
+                  <MenuItem key={q} value={q}>{q}</MenuItem>
+                ))}
+              </Select>
+            </>
           )}
 
-          {/* Year select (for quarterly & yearly) */}
-          {(periodMode === "quarterly" || periodMode === "yearly") && (
+          {periodMode === "yearly" && (
             <Select
               value={selectedYear}
               onChange={(e) => setSelectedYear(e.target.value)}
-              disabled={loading}
+              disabled={controlsDisabled}
               sx={{
-                height: 40,
-                minWidth: 110,
-                backgroundColor: loading ? colors.grey[600] : colors.blueAccent[600],
-                color: colors.grey[100],
-                borderColor: colors.grey[100],
-                fontWeight: "bold",
+                height: 40, minWidth: 110,
+                backgroundColor: controlsDisabled ? colors.grey[600] : colors.blueAccent[600],
+                color: colors.grey[100], fontWeight: "bold",
                 "& .MuiSelect-icon": { color: colors.grey[100] },
                 "& fieldset": { border: "none" },
               }}
             >
-              {yearOptions.map((y) => (
+              {(availYears.length ? availYears : [selectedYear]).map((y) => (
                 <MenuItem key={y} value={y}>{y}</MenuItem>
               ))}
             </Select>
           )}
 
-          {/* Show All / Top 5 */}
           <Button
             variant="outlined"
-            onClick={() => {
-              setShowAll((s) => !s);
-              setCurrentPage(0);
-            }}
-            disabled={loading}
+            onClick={() => { setShowAll((s) => !s); setCurrentPage(0); }}
+            disabled={controlsDisabled}
             sx={{
-              height: 40,
-              minWidth: 140,
-              borderColor: colors.grey[100],   // ✅ correct prop
-              backgroundColor: loading ? colors.grey[600] : colors.blueAccent[600],
-              color: colors.grey[100],
-              fontWeight: "bold",
-              "&:hover": { backgroundColor: loading ? colors.grey[600] : colors.blueAccent[700] },
+              height: 40, minWidth: 140,
+              borderColor: colors.grey[100],
+              backgroundColor: controlsDisabled ? colors.grey[600] : colors.blueAccent[600],
+              color: colors.grey[100], fontWeight: "bold",
+              "&:hover": { backgroundColor: controlsDisabled ? colors.grey[600] : colors.blueAccent[700] },
               "&:disabled": { backgroundColor: colors.grey[600], color: colors.grey[300] },
             }}
           >
             {showAll ? "Show Top 5" : "Show All"}
           </Button>
+
+          {/* Show Clear Filters ONLY if filters changed */}
+          {!isDefaultFilters && (
+            <Button
+              variant="outlined"
+              onClick={handleClearFilters}
+              disabled={controlsDisabled}
+              sx={{
+                height: 40, minWidth: 130,
+                borderColor: colors.grey[100],
+                backgroundColor: controlsDisabled ? colors.grey[600] : colors.blueAccent[600],
+                color: colors.grey[100], fontWeight: "bold",
+                "&:hover": { backgroundColor: controlsDisabled ? colors.grey[600] : colors.blueAccent[700] },
+                "&:disabled": { backgroundColor: colors.grey[600], color: colors.grey[300] },
+              }}
+            >
+              Clear Filters
+            </Button>
+          )}
         </Box>
       </Box>
 
+      {/* Chart */}
       <Box height="320px" display="flex" alignItems="center">
-        {/* Prev (paging) */}
         {showAll && !loading && (
           <Button
             variant="contained"
@@ -309,8 +446,7 @@ const FinancialPerformanceTrendChart = ({
             disabled={currentPage === 0}
             onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}
             sx={{
-              mx: 2,
-              height: "fit-content",
+              mx: 2, height: "fit-content",
               backgroundColor: colors.blueAccent[600],
               color: colors.grey[100],
               "&:disabled": { backgroundColor: colors.grey[600], color: colors.grey[300] },
@@ -320,15 +456,18 @@ const FinancialPerformanceTrendChart = ({
           </Button>
         )}
 
-        {/* Chart / Loading / Empty */}
         <Box flexGrow={1} minWidth={0} overflow="hidden" display="flex" justifyContent="center" alignItems="center" height="100%">
-          {loading ? (
+          {loading || availabilityLoading || (isCoordinator && programLoading) ? (
             <Box display="flex" flexDirection="column" alignItems="center" gap={2}>
               <CircularProgress
                 size={60}
                 sx={{ color: colors.greenAccent[500], "& .MuiCircularProgress-circle": { strokeLinecap: "round" } }}
               />
-              <Typography variant="h6" color={colors.grey[300]}>Loading chart data…</Typography>
+              <Typography variant="h6" color={colors.grey[300]}>
+                {availabilityLoading || (isCoordinator && programLoading)
+                  ? "Loading filters…"
+                  : "Loading chart data…"}
+              </Typography>
             </Box>
           ) : seriesAll.length === 0 ? (
             <Typography variant="h6" color={colors.grey[300]}>No data available for plotting.</Typography>
@@ -347,7 +486,7 @@ const FinancialPerformanceTrendChart = ({
               colors={isDashboard ? { datum: "color" } : { scheme: "nivo" }}
               margin={{ top: 50, right: 210, bottom: 50, left: 60 }}
               xScale={{ type: "point", domain: monthDomain }}
-              yScale={{ type: "linear", min: minY, max: maxY, stacked: false, reverse: false }}
+              yScale={{ type: "linear", min: 0, max: 5, stacked: false, reverse: false }}
               yFormat=" >-.2f"
               curve="catmullRom"
               axisTop={null}
@@ -401,7 +540,6 @@ const FinancialPerformanceTrendChart = ({
           )}
         </Box>
 
-        {/* Next (paging) */}
         {showAll && !loading && (
           <Button
             variant="contained"
@@ -409,8 +547,7 @@ const FinancialPerformanceTrendChart = ({
             disabled={(currentPage + 1) * SEsPerPage >= seriesAll.length}
             onClick={() => setCurrentPage((p) => p + 1)}
             sx={{
-              mx: 2,
-              height: "fit-content",
+              mx: 2, height: "fit-content",
               backgroundColor: colors.blueAccent[600],
               color: colors.grey[100],
               "&:disabled": { backgroundColor: colors.grey[600], color: colors.grey[300] },
