@@ -145,51 +145,225 @@ exports.getAllSocialEnterprisesForComparison = async (program = null) => {
   }
 };
 
-exports.getFlaggedSEs = async (program = null) => {
+exports.getFlaggedSEs = async (arg = null) => {
+  // Back-compat: plain string => program_name
+  const opts = (typeof arg === "string" || arg == null)
+    ? { program_id: null, program_name: arg ?? null, se_id: null }
+    : arg;
+
+  const {
+    program_id   = null, // UUID or null
+    program_name = null, // exact name or null
+    se_id        = null, // UUID or null
+  } = opts ?? {};
+
+  const isUuid = v =>
+    !v || /^[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[1-5][0-9a-fA-F-]{3}-[89abAB][0-9a-fA-F-]{3}-[1-9a-fA-F][0-9a-fA-F]{2}$/.test(v);
+
+  if (!isUuid(program_id)) throw new Error("INVALID_PROGRAM_ID");
+  if (!isUuid(se_id))      throw new Error("INVALID_SE_ID");
+
+  const sql = `
+    WITH params AS (
+      SELECT
+        -- last 3 *complete* months in Asia/Manila
+        (date_trunc('month', (now() AT TIME ZONE 'Asia/Manila')) - interval '3 months')::date AS from_date,
+        (date_trunc('month', (now() AT TIME ZONE 'Asia/Manila')))::date                     AS to_date,
+        $1::uuid AS only_program,
+        $2::uuid AS only_se,
+        $3::text AS only_program_name
+    ),
+    -- Program/SE filter baseline (ALL SEs in scope regardless of data)
+    scope_all AS (
+      SELECT s.se_id, TRIM(s.team_name) AS team_name, TRIM(COALESCE(s.abbr, s.team_name)) AS abbr
+      FROM socialenterprises s
+      JOIN programs pr ON pr.program_id = s.program_id
+      JOIN params p ON TRUE
+      WHERE (p.only_program      IS NULL OR s.program_id = p.only_program)
+        AND (p.only_se           IS NULL OR s.se_id      = p.only_se)
+        AND (p.only_program_name IS NULL OR pr.name      = p.only_program_name)
+    ),
+    -- Monthly-report completeness within the 3-month window
+    mrg AS (
+      SELECT g.se_id, g."month", COUNT(DISTINCT g.report_type) AS rep_count
+      FROM monthly_report_guard g
+      JOIN scope_all s ON s.se_id = g.se_id
+      JOIN params p ON TRUE
+      WHERE g."month" >= p.from_date AND g."month" < p.to_date
+      GROUP BY g.se_id, g."month"
+    ),
+    eligible AS (
+      SELECT se_id, SUM((rep_count = 3)::int) AS months_complete
+      FROM mrg
+      GROUP BY se_id
+      HAVING SUM((rep_count = 3)::int) >= 1
+    ),
+
+    /* ===== calculations ONLY for eligible SEs ===== */
+    cin AS (
+      SELECT r.se_id, date_trunc('month', r.report_month)::date AS m,
+             SUM(t.sales_amount + t.other_revenue_amount)::numeric AS inflow_sales
+      FROM cash_in_report r
+      JOIN cash_in_transaction t USING (cash_in_report_id)
+      JOIN eligible e ON e.se_id = r.se_id
+      JOIN params p ON TRUE
+      WHERE r.report_month >= p.from_date AND r.report_month < p.to_date
+      GROUP BY 1,2
+    ),
+    cout AS (
+      SELECT r.se_id, date_trunc('month', r.report_month)::date AS m,
+             SUM(t.cash_amount + t.inventory_amount + t.liability_amount + t.owners_withdrawal_amount)::numeric AS outflow_ops,
+             SUM(t.inventory_amount)::numeric AS purchases
+      FROM cash_out_report r
+      JOIN cash_out_transaction t USING (cash_out_report_id)
+      JOIN eligible e ON e.se_id = r.se_id
+      JOIN params p ON TRUE
+      WHERE r.report_month >= p.from_date AND r.report_month < p.to_date
+      GROUP BY 1,2
+    ),
+    inv AS (
+      SELECT i.se_id, i."month"::date AS m,
+             SUM(COALESCE(begin_qty,0)*COALESCE(begin_unit_price,0))::numeric AS begin_val,
+             SUM(COALESCE(final_qty,0)*COALESCE(final_unit_price,0))::numeric AS end_val
+      FROM inventory_report i
+      JOIN eligible e ON e.se_id = i.se_id
+      JOIN params p ON TRUE
+      WHERE i."month" >= p.from_date AND i."month" < p.to_date
+      GROUP BY 1,2
+    ),
+    turn_raw AS (
+      SELECT COALESCE(inv.se_id, cout.se_id, cin.se_id) AS se_id,
+             COALESCE(inv.m,     cout.m,     cin.m)     AS m,
+             GREATEST(COALESCE(inv.begin_val,0) + COALESCE(cout.purchases,0) - COALESCE(inv.end_val,0), 0)::numeric AS cogs,
+             ((COALESCE(inv.begin_val,0) + COALESCE(inv.end_val,0))/2.0)::numeric AS avg_inventory
+      FROM inv
+      FULL JOIN cout ON cout.se_id = inv.se_id AND cout.m = inv.m
+      FULL JOIN cin  ON cin.se_id  = COALESCE(inv.se_id, cout.se_id) AND cin.m = COALESCE(inv.m, cout.m)
+    ),
+    turn AS (
+      SELECT se_id, m,
+             CASE WHEN avg_inventory > 0 THEN (cogs/avg_inventory)::numeric ELSE NULL END AS turnover
+      FROM turn_raw
+    ),
+    rep AS (
+      SELECT g.se_id, g."month"::date AS m, COUNT(DISTINCT report_type) AS rep_count
+      FROM monthly_report_guard g
+      JOIN eligible e ON e.se_id = g.se_id
+      JOIN params p ON TRUE
+      WHERE g."month" >= p.from_date AND g."month" < p.to_date
+      GROUP BY 1,2
+    ),
+    months AS (
+      SELECT se_id, m FROM cin
+      UNION SELECT se_id, m FROM cout
+      UNION SELECT se_id, m FROM inv
+      UNION SELECT se_id, m FROM rep
+    ),
+    monthly AS (
+      SELECT
+        mo.se_id, mo.m,
+        COALESCE(ci.inflow_sales, 0)::numeric AS inflow_sales,
+        COALESCE(co.outflow_ops,  0)::numeric AS outflow_ops,
+        tu.turnover,
+        COALESCE(rp.rep_count, 0)::int        AS rep_count
+      FROM months mo
+      LEFT JOIN cin  ci ON ci.se_id = mo.se_id AND ci.m = mo.m
+      LEFT JOIN cout co ON co.se_id = mo.se_id AND co.m = mo.m
+      LEFT JOIN turn tu ON tu.se_id = mo.se_id AND tu.m = mo.m
+      LEFT JOIN rep  rp ON rp.se_id = mo.se_id AND rp.m = mo.m
+    ),
+    per_se AS (
+      SELECT e.se_id,
+             SUM(mo.inflow_sales)  AS inflow_total,
+             SUM(mo.outflow_ops)   AS outflow_total,
+             AVG(mo.turnover)      AS avg_turnover,
+             AVG(mo.rep_count/3.0) AS reporting_rate
+      FROM eligible e
+      LEFT JOIN monthly mo ON mo.se_id = e.se_id
+      GROUP BY e.se_id
+    ),
+    scored AS (
+      SELECT *,
+        CASE WHEN inflow_total <= 0 THEN 1
+             WHEN (inflow_total - outflow_total)/NULLIF(inflow_total,0) >= 0.15 THEN 5
+             WHEN (inflow_total - outflow_total)/NULLIF(inflow_total,0) >= 0.05 THEN 4
+             WHEN (inflow_total - outflow_total)/NULLIF(inflow_total,0) >= 0    THEN 3
+             WHEN (inflow_total - outflow_total)/NULLIF(inflow_total,0) >= -0.10 THEN 2
+             ELSE 1 END AS cash_margin_score,
+        CASE WHEN outflow_total <= 0 AND inflow_total > 0 THEN 5
+             WHEN outflow_total <= 0 THEN 1
+             WHEN inflow_total/NULLIF(outflow_total,0) >= 1.5 THEN 5
+             WHEN inflow_total/NULLIF(outflow_total,0) >= 1.2 THEN 4
+             WHEN inflow_total/NULLIF(outflow_total,0) >= 1.0 THEN 3
+             WHEN inflow_total/NULLIF(outflow_total,0) >= 0.8 THEN 2
+             ELSE 1 END AS inout_ratio_score,
+        CASE WHEN avg_turnover IS NULL THEN 1
+             WHEN avg_turnover >= 0.50 THEN 5
+             WHEN avg_turnover >= 0.35 THEN 4
+             WHEN avg_turnover >= 0.25 THEN 3
+             WHEN avg_turnover >= 0.15 THEN 2
+             ELSE 1 END AS turnover_score,
+        ROUND(1 + LEAST(GREATEST(reporting_rate,0),1)*4, 2) AS reporting_score
+      FROM per_se
+    ),
+    flagged AS (
+      SELECT
+        s.se_id,
+        sa.team_name,
+        sa.abbr,
+        s.cash_margin_score AS "Cash Margin",
+        s.inout_ratio_score AS "In/Out Ratio",
+        s.turnover_score    AS "Inventory Turnover",
+        s.reporting_score   AS "Reporting",
+        (s.cash_margin_score + s.inout_ratio_score + s.turnover_score + s.reporting_score) AS risk_total,
+        (
+          (CASE WHEN s.cash_margin_score   <= 1.5 THEN 1 ELSE 0 END) +
+          (CASE WHEN s.inout_ratio_score  <= 1.5 THEN 1 ELSE 0 END) +
+          (CASE WHEN s.turnover_score     <= 1.5 THEN 1 ELSE 0 END) +
+          (CASE WHEN s.reporting_score    <= 1.5 THEN 1 ELSE 0 END)
+        ) AS red_count
+      FROM scored s
+      JOIN scope_all sa ON sa.se_id = s.se_id
+      WHERE
+        ((CASE WHEN s.cash_margin_score   <= 1.5 THEN 1 ELSE 0 END) +
+         (CASE WHEN s.inout_ratio_score  <= 1.5 THEN 1 ELSE 0 END) +
+         (CASE WHEN s.turnover_score     <= 1.5 THEN 1 ELSE 0 END) +
+         (CASE WHEN s.reporting_score    <= 1.5 THEN 1 ELSE 0 END)) > 2
+    )
+    SELECT
+      (SELECT COUNT(*) FROM scope_all)                                                   AS total_se_count,
+      (SELECT COUNT(*) FROM eligible)                                                    AS eligible_se_count,
+      (SELECT COUNT(*) FROM scope_all) - (SELECT COUNT(*) FROM eligible)                 AS no_data_se_count,
+      COALESCE(
+        JSON_AGG(
+          flagged
+          ORDER BY flagged.red_count DESC, flagged.risk_total ASC, flagged.team_name ASC
+        ),
+        '[]'::json
+      ) AS flagged
+    FROM flagged;
+  `;
+
+  const params = [program_id, se_id, program_name];
+
   try {
-    let programFilter = program ? ` AND p.name = '${program}'` : '';
-
-    // Query to get a social enterprise by se_id
-    const query = `
-       WITH recent_evaluations AS (
-          SELECT 
-              e.se_id,  
-              AVG(ec.rating) AS avg_rating
-          FROM evaluation_categories ec
-          JOIN evaluations e ON ec.evaluation_id = e.evaluation_id
-          JOIN socialenterprises s ON s.se_id = e.se_id
-          JOIN programs p ON p.program_id = s.program_id
-          WHERE e.evaluation_type = 'Social Enterprise'
-           ${programFilter}
-          GROUP BY e.se_id
-      )
-
-      SELECT 
-          se.se_id,
-          TRIM(se.team_name) AS team_name,
-          TRIM(COALESCE(se.abbr, se.team_name)) AS abbr,
-          COALESCE(ROUND(re.avg_rating, 2), 0) AS avg_rating,
-          CASE 
-              WHEN re.avg_rating IS NULL THEN 'No Evaluations'
-              ELSE 'Evaluated'
-          END AS evaluation_status
-      FROM socialenterprises se
-      JOIN programs p ON p.program_id = se.program_id  -- ✅ Include programs in outer query
-      LEFT JOIN recent_evaluations re ON se.se_id = re.se_id
-      WHERE (re.avg_rating < 1.5 OR re.avg_rating IS NULL)
-        ${programFilter}  -- ✅ Ensure SEs belong to the same program
-      ORDER BY avg_rating ASC, evaluation_status DESC;
-        `;
-    const res = await pgDatabase.query(query);
-    
-    if (!res.rows || res.rows.length === 0) {
-      return null; // or return an empty array []
-    }
-
-    return res.rows; // return the list of users
-  } catch (error) {
-    console.error("Error fetching user:", error);
-    return null; // or handle error more gracefully
+    const { rows } = await pgDatabase.query(sql, params);
+    const row = rows?.[0] || {};
+    return {
+      totalSeCount: Number(row.total_se_count || 0),
+      eligibleSeCount: Number(row.eligible_se_count || 0),
+      noDataSeCount: Number(row.no_data_se_count || 0),
+      flagged: Array.isArray(row.flagged) ? row.flagged : [],
+    };
+  } catch (err) {
+    console.error("getFlaggedSEs error:", err);
+    return {
+      totalSeCount: 0,
+      eligibleSeCount: 0,
+      noDataSeCount: 0,
+      flagged: [],
+      error: "QUERY_FAILED",
+    };
   }
 };
 

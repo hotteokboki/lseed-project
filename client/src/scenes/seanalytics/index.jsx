@@ -115,7 +115,7 @@ const SEAnalytics = () => {
     fetchApplicationDetails();
   }, [selectedSE]);
 
-  function usePortfolioKPIs({ from, to, program } = {}) {
+  function usePortfolioKPIs({ from, to, program, seId } = {}) {
     const [kpis, setKpis] = useState(null);
     const [loading, setLoading] = useState(true);
     const [err, setErr] = useState(null);
@@ -126,6 +126,7 @@ const SEAnalytics = () => {
       if (from) params.from = from;
       if (to) params.to = to;
       if (program) params.program = program;
+      if (seId) params.se_id = seId; // NEW: filter by SE
 
       (async () => {
         try {
@@ -140,7 +141,7 @@ const SEAnalytics = () => {
       })();
 
       return () => { cancelled = true; };
-    }, [from, to, program]);
+    }, [from, to, program, seId]); // include seId
 
     return { kpis, loading, err };
   }
@@ -150,9 +151,7 @@ const SEAnalytics = () => {
   const fmtNum = (n) => (n == null ? "—" : Number(n).toLocaleString());
 
   const { kpis, loading, err } = usePortfolioKPIs({
-    // from: "2025-01-01",
-    // to: "2025-07-01",
-    // program: selectedProgram,
+    seId: selectedSEId
   });
 
   useEffect(() => {

@@ -287,7 +287,7 @@ const CollaborationDashboard = () => {
           subtitle="Welcome to Collaborations"
         />
       </Box>
-
+      {/* TODO: Fix the statboxes */}
       {/* Row 2 - Collaboration Insights StatBoxes */}
       <Box
         display="flex"

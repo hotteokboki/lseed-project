@@ -23,20 +23,21 @@ import {
   DialogTitle,
   Snackbar,
   Typography,
-  useTheme
+  useTheme,
+  Tooltip
 } from "@mui/material";
 import { DataGrid, GridToolbar } from "@mui/x-data-grid";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import axiosClient from "../../api/axiosClient";
-import AcknowledgmentChart from "../../components/AcknowledgmentChart";
+import RedFlagsPareto from "../../components/RedFlagsPareto";
 import Header from "../../components/Header";
 import SEPerformanceTrendChart from "../../components/SEPerformanceTrendChart";
 import StatBox from "../../components/StatBox";
 import { useAuth } from "../../context/authContext";
 import { tokens } from "../../theme";
 
-const Dashboard = ({}) => {
+const Dashboard = ({ }) => {
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
   const { user, isMentorView, toggleView, loading: authLoading } = useAuth();
@@ -87,6 +88,18 @@ const Dashboard = ({}) => {
   const isCoordinator = user?.roles?.includes("LSEED-Coordinator");
   const hasBothRoles = hasMentorRole && isLSEEDUser;
   const isCoordinatorView = !isMentorView;
+
+  const RED_THRESHOLD = 1.5;
+  const fmt = (v) => (Number.isFinite(v) ? v.toFixed(2) : "—");
+
+  const redAreas = (row) => {
+    const areas = [];
+    if (row.cashMargin <= RED_THRESHOLD) areas.push(`Cash Margin (${fmt(row.cashMargin)})`);
+    if (row.inOutRatio <= RED_THRESHOLD) areas.push(`In/Out Ratio (${fmt(row.inOutRatio)})`);
+    if (row.inventoryTurnover <= RED_THRESHOLD) areas.push(`Inventory Turnover (${fmt(row.inventoryTurnover)})`);
+    if (row.reporting <= RED_THRESHOLD) areas.push(`Reporting (${fmt(row.reporting)})`);
+    return areas;
+  };
 
   const setLoading = (key, value) => {
     setLoadingStates((prev) => ({ ...prev, [key]: value }));
@@ -148,8 +161,8 @@ const Dashboard = ({}) => {
       const status = a.success
         ? "Successful"
         : a.twofa_pending
-        ? "2FA required"
-        : "Failed";
+          ? "2FA required"
+          : "Failed";
       const when = new Date(a.attempted_at).toLocaleString();
       const ip = a.ip || "Unknown IP";
       return `Last account use: ${when} from ${ip} (${status})`;
@@ -187,50 +200,106 @@ const Dashboard = ({}) => {
 
   const alertColumns = [
     { field: "seName", headerName: "SE Name", flex: 2 },
+
     {
-      field: "averageScore",
-      headerName: "Avg Score",
+      field: "redCount",
+      headerName: "Red Flags",
       flex: 1,
-      renderCell: (params) => (
-        <Typography
-          sx={{
-            color:
-              params.value === 0
-                ? "gray"
-                : params.value < 1.5
-                ? colors.redAccent[500]
-                : "black",
-            display: "flex",
-            fontWeight: "bold",
-            alignItems: "center",
-            justifyContent: "flex-start",
-            height: "100%",
-          }}
-        >
-          {params.value === 0 ? "No Evaluations" : params.value}
-        </Typography>
-      ),
+      type: "number",
+      description:
+        "Count of categories scoring ≤ 1.5 (Cash Margin, In/Out Ratio, Inventory Turnover, Reporting) over the last 3 complete months.",
+      renderCell: ({ row, value }) => {
+        const reds = redAreas(row);
+        return (
+          <Tooltip
+            arrow
+            placement="top"
+            title={
+              <Box sx={{ p: 1 }}>
+                <Typography variant="caption" fontWeight={700} display="block">
+                  Flagged areas (≤ 1.5)
+                </Typography>
+                {reds.length ? (
+                  <ul style={{ margin: 0, paddingLeft: 16 }}>
+                    {reds.map((t) => (
+                      <li key={t} style={{ lineHeight: 1.2 }}>{t}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <Typography variant="caption">None</Typography>
+                )}
+                <Typography variant="caption" sx={{ opacity: 0.7, display: "block", mt: 0.5 }}>
+                  Window: last 3 complete months
+                </Typography>
+              </Box>
+            }
+          >
+            <Chip
+              label={typeof value === "number" ? `${value} of 4` : "—"}
+              size="small"
+              color={value >= 3 ? "error" : value === 2 ? "warning" : "default"}
+              sx={{ fontWeight: 700 }}
+            />
+          </Tooltip>
+        );
+      },
     },
+
     {
-      field: "lastEvaluated",
-      headerName: "Last Evaluated",
-      flex: 2,
-      renderCell: (params) => (
-        <Typography
-          sx={{
-            color:
-              params.value === "No Evaluations" ? "gray" : colors.grey[100],
-            display: "flex",
-            fontWeight: "bold",
-            alignItems: "center",
-            justifyContent: "flex-start",
-            height: "100%",
-          }}
-        >
-          {params.value}
-        </Typography>
-      ),
+      field: "riskTotal",
+      headerName: "Risk Total",
+      flex: 1,
+      type: "number",
+      description:
+        "Sum of four scores (1–5 each). Range 4–20. Lower total = higher risk / needs attention.",
+      renderCell: ({ row, value }) => {
+        const parts = [
+          ["Cash Margin", row.cashMargin],
+          ["In/Out Ratio", row.inOutRatio],
+          ["Inventory Turnover", row.inventoryTurnover],
+          ["Reporting", row.reporting],
+        ];
+        return (
+          <Tooltip
+            arrow
+            placement="top"
+            title={
+              <Box sx={{ p: 1 }}>
+                <Typography variant="caption" fontWeight={700} display="block">
+                  Risk Total (lower = riskier)
+                </Typography>
+                <Typography variant="caption" display="block" sx={{ mb: 0.5 }}>
+                  Sum of four category scores:
+                </Typography>
+                <ul style={{ margin: 0, paddingLeft: 16 }}>
+                  {parts.map(([k, v]) => (
+                    <li key={k} style={{ lineHeight: 1.2 }}>
+                      <b>{k}:</b> {fmt(v)}
+                    </li>
+                  ))}
+                </ul>
+                <Typography variant="caption" display="block" sx={{ mt: 0.5 }}>
+                  Total: <b>{fmt(value)}</b> / 20
+                </Typography>
+              </Box>
+            }
+          >
+            <Typography
+              sx={{
+                fontWeight: "bold",
+                color:
+                  typeof value === "number" && value <= 8
+                    ? colors.redAccent[500]
+                    : colors.grey[100],
+              }}
+            >
+              {fmt(value)}
+            </Typography>
+          </Tooltip>
+        );
+      },
     },
+
     {
       field: "actions",
       headerName: "Actions",
@@ -239,11 +308,9 @@ const Dashboard = ({}) => {
         <Button
           variant="contained"
           sx={{
-            backgroundColor: colors.redAccent[500] + " !important", // Force color
-            color: colors.grey[100], // Ensure text is visible
-            "&:hover": {
-              backgroundColor: colors.redAccent[700] + " !important", // Darker red on hover
-            },
+            backgroundColor: colors.redAccent[500] + " !important",
+            color: colors.grey[100],
+            "&:hover": { backgroundColor: colors.redAccent[700] + " !important" },
           }}
           onClick={() => handleAction(params.row.id)}
         >
@@ -599,7 +666,6 @@ const Dashboard = ({}) => {
     },
   ];
 
-  // TO DO: change query for flagged
   useEffect(() => {
     const fetchFlaggedSE = async () => {
       try {
@@ -621,13 +687,40 @@ const Dashboard = ({}) => {
         }
         const data = response.data;
 
+        // in your useEffect, after fetching `data`:
+        const clamp1to5 = (v) => {
+          const n = Number(v);
+          if (!Number.isFinite(n)) return 1;
+          return Math.min(5, Math.max(1, n));
+        };
+        const isRed = (v) => Number.isFinite(v) && v <= 1.5;
+
         if (Array.isArray(data)) {
-          const formattedSEs = data.map((se) => ({
-            id: se.se_id, // Assuming se_id is unique
-            seName: se.team_name,
-            averageScore: se.avg_rating || 0, // Default to 0 if no rating
-            lastEvaluated: se.evaluation_status, // "No Evaluations" or "Evaluated"
-          }));
+          const formattedSEs = data.map((se) => {
+            const cash = Number(se["Cash Margin"] ?? 1);
+            const inOut = Number(se["In/Out Ratio"] ?? 1);
+            const inv = Number(se["Inventory Turnover"] ?? 1);
+            const rep = clamp1to5(se["Reporting"]);     // <-- clamps 0 to 1
+
+            const redCount =
+              (isRed(cash) ? 1 : 0) +
+              (isRed(inOut) ? 1 : 0) +
+              (isRed(inv) ? 1 : 0) +
+              (isRed(rep) ? 1 : 0);
+
+            const riskTotal = (cash || 1) + (inOut || 1) + (inv || 1) + rep; // 4–20
+
+            return {
+              id: se.se_id,
+              seName: (se.team_name ?? "").trim(),
+              cashMargin: cash,
+              inOutRatio: inOut,
+              inventoryTurnover: inv,
+              reporting: rep,
+              redCount,
+              riskTotal,
+            };
+          });
 
           setLowPerformingSEs(formattedSEs);
         } else {
@@ -944,16 +1037,16 @@ const Dashboard = ({}) => {
                 increase={
                   isNaN(
                     parseInt(stats?.mentorWithoutMentorshipCount[0]?.count) /
-                      parseInt(stats?.mentorCountTotal[0]?.count)
+                    parseInt(stats?.mentorCountTotal[0]?.count)
                   )
                     ? "0%"
                     : `${(
-                        (parseInt(
-                          stats?.mentorWithoutMentorshipCount[0]?.count
-                        ) /
-                          parseInt(stats?.mentorCountTotal[0]?.count)) *
-                        100
-                      ).toFixed(2)}%`
+                      (parseInt(
+                        stats?.mentorWithoutMentorshipCount[0]?.count
+                      ) /
+                        parseInt(stats?.mentorCountTotal[0]?.count)) *
+                      100
+                    ).toFixed(2)}%`
                 }
                 icon={
                   <PersonIcon
@@ -981,14 +1074,14 @@ const Dashboard = ({}) => {
                 increase={
                   isNaN(
                     parseInt(stats?.mentorWithMentorshipCount[0]?.count) /
-                      parseInt(stats?.mentorCountTotal[0]?.count)
+                    parseInt(stats?.mentorCountTotal[0]?.count)
                   )
                     ? "0%"
                     : `${(
-                        (parseInt(stats?.mentorWithMentorshipCount[0]?.count) /
-                          parseInt(stats?.mentorCountTotal[0]?.count)) *
-                        100
-                      ).toFixed(2)}%`
+                      (parseInt(stats?.mentorWithMentorshipCount[0]?.count) /
+                        parseInt(stats?.mentorCountTotal[0]?.count)) *
+                      100
+                    ).toFixed(2)}%`
                 }
                 icon={
                   <PersonIcon
@@ -1054,9 +1147,8 @@ const Dashboard = ({}) => {
               bgcolor={colors.primary[400]}
             >
               <Chip
-                label={`${stats.totalPrograms} LSEED ${
-                  stats.totalPrograms === 1 ? "Program" : "Programs"
-                }`}
+                label={`${stats.totalPrograms} LSEED ${stats.totalPrograms === 1 ? "Program" : "Programs"
+                  }`}
                 icon={
                   <SchoolIcon
                     sx={{ fontSize: "26px", color: colors.greenAccent[500] }}
@@ -1145,22 +1237,9 @@ const Dashboard = ({}) => {
               gridRow="span 2"
               bgcolor={colors.primary[400]}
               p={2}
-              display="flex"
-              alignItems="center"
-              justifyContent="center"
-              height="100%"
-              minHeight="300px"
-              overflow="hidden"
+              sx={{ height: 300, overflow: "hidden", display: "flex", flexDirection: "column" }}
             >
-              <AcknowledgmentChart
-                style={{
-                  width: "200px",
-                  height: "200px",
-                  maxWidth: "400px",
-                  maxHeight: "300px",
-                  objectFit: "contain",
-                }}
-              />
+              <RedFlagsPareto />
             </Box>
 
             {/* Alert & Schedule Sections */}
@@ -1180,7 +1259,7 @@ const Dashboard = ({}) => {
                 <Typography
                   variant="h3"
                   fontWeight="bold"
-                  color={colors.redAccent[500]}
+                  color={colors.greenAccent[500]}
                   marginBottom="15px"
                 >
                   SEs Requiring Immediate Attention
@@ -1193,9 +1272,9 @@ const Dashboard = ({}) => {
                     "& .MuiDataGrid-root": { border: "none" },
                     "& .MuiDataGrid-cell": { borderBottom: "none" },
                     "& .MuiDataGrid-columnHeaders, & .MuiDataGrid-columnHeader":
-                      {
-                        backgroundColor: colors.blueAccent[700] + " !important",
-                      },
+                    {
+                      backgroundColor: colors.blueAccent[700] + " !important",
+                    },
                     "& .MuiDataGrid-virtualScroller": {
                       backgroundColor: colors.primary[400],
                     },
@@ -1244,7 +1323,7 @@ const Dashboard = ({}) => {
                 <Typography
                   variant="h3"
                   fontWeight="bold"
-                  color={colors.blueAccent[500]}
+                  color={colors.greenAccent[500]}
                   marginBottom="15px"
                 >
                   Pending Mentoring Schedules
@@ -1257,9 +1336,9 @@ const Dashboard = ({}) => {
                     "& .MuiDataGrid-root": { border: "none" },
                     "& .MuiDataGrid-cell": { borderBottom: "none" },
                     "& .MuiDataGrid-columnHeaders, & .MuiDataGrid-columnHeader":
-                      {
-                        backgroundColor: colors.blueAccent[700] + " !important",
-                      },
+                    {
+                      backgroundColor: colors.blueAccent[700] + " !important",
+                    },
                     "& .MuiDataGrid-virtualScroller": {
                       backgroundColor: colors.primary[400],
                     },
@@ -1286,11 +1365,9 @@ const Dashboard = ({}) => {
                     <DataGrid
                       rows={mentorSchedules.map((schedule) => ({
                         id: schedule.mentoring_session_id,
-                        sessionDetails: `Mentoring Session for ${
-                          schedule.team_name || "Unknown SE"
-                        } with Mentor ${
-                          schedule.mentor_name || "Unknown Mentor"
-                        }`,
+                        sessionDetails: `Mentoring Session for ${schedule.team_name || "Unknown SE"
+                          } with Mentor ${schedule.mentor_name || "Unknown Mentor"
+                          }`,
                         date:
                           `${schedule.mentoring_session_date}, ${schedule.mentoring_session_time}` ||
                           "N/A",
@@ -1421,9 +1498,9 @@ const Dashboard = ({}) => {
                     "& .MuiDataGrid-cell": { borderBottom: "none" },
                     "& .name-column--cell": { color: colors.greenAccent[300] },
                     "& .MuiDataGrid-columnHeaders, & .MuiDataGrid-columnHeader":
-                      {
-                        backgroundColor: colors.blueAccent[700] + " !important",
-                      },
+                    {
+                      backgroundColor: colors.blueAccent[700] + " !important",
+                    },
                     "& .MuiDataGrid-virtualScroller": {
                       backgroundColor: colors.primary[400],
                     },
@@ -1782,9 +1859,8 @@ const Dashboard = ({}) => {
                 <DataGrid
                   rows={upcomingSchedules.map((schedule) => ({
                     id: schedule.mentoring_session_id,
-                    sessionDetails: `Mentoring Session for ${
-                      schedule.team_name || "Unknown SE"
-                    } with Mentor ${schedule.mentor_name || "Unknown Mentor"}`,
+                    sessionDetails: `Mentoring Session for ${schedule.team_name || "Unknown SE"
+                      } with Mentor ${schedule.mentor_name || "Unknown Mentor"}`,
                     date:
                       `${schedule.mentoring_session_date}, ${schedule.mentoring_session_time}` ||
                       "N/A",
@@ -1892,7 +1968,7 @@ const Dashboard = ({}) => {
 
               {/* Categories Section */}
               {selectedEvaluation.categories &&
-              selectedEvaluation.categories.length > 0 ? (
+                selectedEvaluation.categories.length > 0 ? (
                 selectedEvaluation.categories.map((category, index) => (
                   <Box
                     key={index}

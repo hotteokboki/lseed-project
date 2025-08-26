@@ -26,8 +26,6 @@ const rateLimit = require('express-rate-limit');
 const profileRoutes = require("./routes/profileRoutes.js");
 const securityRoutes = require("./routes/securityRoutes");
 const mentorshipRoutes = require("./routes/mentorships");
-const cashflowRoutes = require("./routes/cashflowRoutes");
-const inventoryRoutes = require("./routes/inventoryRoutes");
 const reportsRoutes = require("./routes/reportsRoutes");
 
 const { getMentorsBySocialEnterprises,
@@ -104,7 +102,8 @@ const { getEvaluationsByMentorID,
   getEvaluationsMadeByMentor,
   getAllMentorTypeEvaluations,
   getRecentEvaluationsMadeByMentor,
-  getEvaluationSubmittedCount } = require("./controllers/evaluationsController.js");
+  getEvaluationSubmittedCount,
+  getCategoryHealthOverview} = require("./controllers/evaluationsController.js");
 const { getActiveMentors } = require("./controllers/mentorsController");
 const { getSocialEnterprisesWithoutMentor } = require("./controllers/socialenterprisesController");
 const { updateSocialEnterpriseStatus } = require("./controllers/socialenterprisesController");
@@ -128,7 +127,7 @@ const {
   ALLOWED_COMM_MODES,
   filterAllowed,
 } = require("./utils/allowLists");
-const { getTopStarTrend, getOverallCashFlow, getTopSellingItemsOverall, getInventoryTurnoverOverall, getFinanceRiskHeatmap, getFinanceKPIs, getMonthlyCapitalFlows, getMonthlyNetCash, getRevenueSeasonality } = require("./controllers/ratingsController.js");
+const { getTopStarTrend, getOverallCashFlow, getTopSellingItemsOverall, getInventoryTurnoverOverall, getFinanceRiskHeatmap, getFinanceKPIs, getMonthlyCapitalFlows, getMonthlyNetCash, getRevenueSeasonality } = require("./controllers/financialAnalyticsController.js");
 
 const app = express();
 
@@ -311,9 +310,6 @@ app.get('/api/get-csrf-token', (req, res) => {
 app.use('/api', isAuthenticated, isAjaxRequest, doubleCsrfProtection);
 
 // API Routes
-//TODO: Check security?
-app.use("/api/cashflow", cashflowRoutes);
-app.use("/api/inventory-distribution", inventoryRoutes);
 app.use("/auth", authRoutes);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/mentorships", mentorshipRoutes);
@@ -2038,7 +2034,6 @@ app.get("/api/mentors-with-mentorships", async (req, res) => {
   }
 });
 
-//TO DO
 app.get("/api/dashboard-stats", async (req, res) => {
   try {
     const program = req.query.program || null; // Optional program param
@@ -2254,7 +2249,7 @@ app.get("/api/pending-schedules", async (req, res) => {
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
-//TODO change query
+
 app.get("/api/flagged-ses", async (req, res) => {
   try {
     const program = req.query.program || null; // Optional program param
@@ -2268,19 +2263,23 @@ app.get("/api/flagged-ses", async (req, res) => {
   }
 });
 
-app.get("/api/ack-data", async (req, res) => {
+app.get("/api/red-flags-overview", async (req, res) => {
   try {
-    const program = req.query.program || null; // Optional program param
+    const {
+      program_id: programId = null,
+      period = "3m",           // 3m | 6m | 12m | ytd
+      start  = null,           // optional YYYY-MM-01
+      end    = null            // optional YYYY-MM-01 (end-exclusive)
+    } = req.query;
 
-    const result = await getAcknowledgementData(program);
-
-    res.status(200).json(result);
-  } catch (error) {
-    console.error("❌ Error fetching pending schedules:", error);
+    const data = await getCategoryHealthOverview({ programId, period, start, end });
+    res.status(200).json(data);
+  } catch (err) {
+    console.error("❌ red-flags-overview failed:", err);
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
-// TODO Maybe change query
+
 app.get("/api/evaluation-stats", async (req, res) => {
   try {
     const program = req.query.program || null; // Optional program param
@@ -3063,15 +3062,17 @@ app.get("/api/finance-risk-heatmap", async (req, res) => {
 app.get("/api/finance-kpis", async (req, res) => {
   try {
     const period  = (req.query.period || "overall").toLowerCase();
-    const program = req.query.program || null;
+    const program = req.query.program || null;   
+    const se_id   = req.query.se_id || null;     
 
     let from = req.query.from ?? null;
     let to   = req.query.to   ?? null;
 
     if (!from && !to && (period === "quarterly" || period === "yearly")) {
       const year = parseInt(req.query.year, 10) || new Date().getFullYear();
-      if (period === "yearly") { from = `${year}-01-01`; to = `${year+1}-01-01`; }
-      if (period === "quarterly") {
+      if (period === "yearly") {
+        from = `${year}-01-01`; to = `${year+1}-01-01`;
+      } else {
         const q = (req.query.quarter || "Q1").toUpperCase();
         ({ from, to } =
           q === "Q1" ? { from: `${year}-01-01`, to: `${year}-04-01` } :
@@ -3081,7 +3082,7 @@ app.get("/api/finance-kpis", async (req, res) => {
       }
     }
 
-    const data = await getFinanceKPIs({ from, to, program });
+    const data = await getFinanceKPIs({ from, to, program, seId: se_id });
     res.json(data);
   } catch (e) {
     console.error("GET /api/finance-kpis error:", e);

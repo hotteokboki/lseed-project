@@ -678,35 +678,245 @@ exports.getMentorEvaluationCount = async (mentor_id) => {
     }
 };
 
-exports.getAcknowledgementData = async (program = null) => {
-    try {
-        let programFilter = program ? ` AND p.name = '${program}'` : '';
+exports.getCategoryHealthOverview = async ({ programId = null, period = "3m", start = null, end = null } = {}) => {
+  const sql = `
+    WITH params AS (
+      SELECT
+        /* from_date */
+        CASE
+          WHEN $3::date IS NOT NULL AND $4::date IS NOT NULL
+            THEN date_trunc('month', $3::date)
+          WHEN $2::text = 'ytd'
+            THEN date_trunc('year', now() AT TIME ZONE 'Asia/Manila')::date
+          WHEN $2::text IN ('6m','12m')
+            THEN (date_trunc('month', now() AT TIME ZONE 'Asia/Manila') - 
+                  (CASE WHEN $2='6m' THEN interval '6 months' ELSE interval '12 months' END))::date
+          ELSE /* default 3m */
+            (date_trunc('month', now() AT TIME ZONE 'Asia/Manila') - interval '3 months')::date
+        END AS from_date,
+        /* to_date (end-exclusive, first day of current month unless explicit) */
+        CASE
+          WHEN $3::date IS NOT NULL AND $4::date IS NOT NULL
+            THEN date_trunc('month', $4::date)
+          ELSE date_trunc('month', now() AT TIME ZONE 'Asia/Manila')::date
+        END AS to_date,
+        $1::uuid AS only_program
+    ),
 
-        const query = `
-            SELECT 
-                CONCAT(t.mentor_id, '-', t.se_id) AS batch,  -- Grouping by mentor_id and se_ID
-                s.team_name AS se_name,  -- Get the social enterprise name
-                COUNT(CASE WHEN e."isAcknowledge" = true THEN 1 END) * 100.0 / COUNT(*) AS acknowledged_percentage,
-                COUNT(CASE WHEN e."isAcknowledge" = false THEN 1 END) * 100.0 / COUNT(*) AS pending_percentage
-            FROM evaluations e
-            JOIN telegrambot t 
-                ON e.mentor_id = t.mentor_id 
-                AND e.se_id = t.se_id 
-            JOIN socialenterprises s 
-                ON t.se_id = s.se_id  
-            JOIN programs AS p ON p.program_id = s.program_id
-            WHERE e.evaluation_type = 'Social Enterprise'
-            ${programFilter}
-            GROUP BY t.mentor_id, t.se_id, s.team_name
-            ORDER BY COUNT(CASE WHEN e."isAcknowledge" = true THEN 1 END) DESC  -- Sort by acknowledged evaluations
-            LIMIT 10;
-        `;
-        const result = await pgDatabase.query(query);
-        return result.rows;
-    } catch (error) {
-        console.error("❌ Error fetching top ack data:", error);
-        return [];
-    }
+    scope_se AS (
+      SELECT s.se_id, TRIM(s.team_name) AS team_name, TRIM(COALESCE(s.abbr, s.team_name)) AS abbr
+      FROM socialenterprises s, params p
+      WHERE (p.only_program IS NULL OR s.program_id = p.only_program)
+    ),
+
+    /* windowed reporting (for completeness checks) */
+    mrg AS (
+      SELECT g.se_id, g."month", COUNT(DISTINCT g.report_type) AS rep_count
+      FROM monthly_report_guard g
+      JOIN scope_se s ON s.se_id = g.se_id
+      JOIN params p ON TRUE
+      WHERE g."month" >= p.from_date AND g."month" < p.to_date
+      GROUP BY g.se_id, g."month"
+    ),
+
+    /* per-SE month coverage inside window */
+    rep_per_se AS (
+      SELECT
+        se_id,
+        COUNT(*)                              AS months_any,
+        COUNT(*) FILTER (WHERE rep_count=3)   AS months_complete
+      FROM mrg
+      GROUP BY se_id
+    ),
+
+    /* monthly plumbing limited to scope_se (not eligibility), we’ll gate later */
+    cin AS (
+      SELECT r.se_id, date_trunc('month', r.report_month)::date AS m,
+             SUM(t.sales_amount + t.other_revenue_amount)::numeric AS inflow_sales
+      FROM cash_in_report r
+      JOIN cash_in_transaction t USING (cash_in_report_id)
+      JOIN scope_se s ON s.se_id = r.se_id
+      JOIN params p ON TRUE
+      WHERE r.report_month >= p.from_date AND r.report_month < p.to_date
+      GROUP BY 1,2
+    ),
+    cout AS (
+      SELECT r.se_id, date_trunc('month', r.report_month)::date AS m,
+             SUM(t.cash_amount + t.inventory_amount + t.liability_amount + t.owners_withdrawal_amount)::numeric AS outflow_ops,
+             SUM(t.inventory_amount)::numeric AS purchases
+      FROM cash_out_report r
+      JOIN cash_out_transaction t USING (cash_out_report_id)
+      JOIN scope_se s ON s.se_id = r.se_id
+      JOIN params p ON TRUE
+      WHERE r.report_month >= p.from_date AND r.report_month < p.to_date
+      GROUP BY 1,2
+    ),
+    inv AS (
+      SELECT i.se_id, i."month"::date AS m,
+             SUM(COALESCE(begin_qty,0)*COALESCE(begin_unit_price,0))::numeric AS begin_val,
+             SUM(COALESCE(final_qty,0)*COALESCE(final_unit_price,0))::numeric AS end_val
+      FROM inventory_report i
+      JOIN scope_se s ON s.se_id = i.se_id
+      JOIN params p ON TRUE
+      WHERE i."month" >= p.from_date AND i."month" < p.to_date
+      GROUP BY 1,2
+    ),
+    turn_raw AS (
+      SELECT COALESCE(inv.se_id, cout.se_id, cin.se_id) AS se_id,
+             COALESCE(inv.m,     cout.m,     cin.m)     AS m,
+             GREATEST(COALESCE(inv.begin_val,0) + COALESCE(cout.purchases,0) - COALESCE(inv.end_val,0), 0)::numeric AS cogs,
+             ((COALESCE(inv.begin_val,0) + COALESCE(inv.end_val,0))/2.0)::numeric AS avg_inventory
+      FROM inv
+      FULL JOIN cout ON cout.se_id = inv.se_id AND cout.m = inv.m
+      FULL JOIN cin  ON cin.se_id  = COALESCE(inv.se_id, cout.se_id) AND cin.m = COALESCE(inv.m, cout.m)
+    ),
+    turn AS (
+      SELECT se_id, m,
+             CASE WHEN avg_inventory > 0 THEN (cogs/avg_inventory)::numeric ELSE NULL END AS turnover
+      FROM turn_raw
+    ),
+    rep AS (
+      SELECT g.se_id, g."month"::date AS m, COUNT(DISTINCT report_type) AS rep_count
+      FROM monthly_report_guard g
+      JOIN scope_se s ON s.se_id = g.se_id
+      JOIN params p ON TRUE
+      WHERE g."month" >= p.from_date AND g."month" < p.to_date
+      GROUP BY 1,2
+    ),
+    months AS (
+      SELECT se_id, m FROM cin
+      UNION SELECT se_id, m FROM cout
+      UNION SELECT se_id, m FROM inv
+      UNION SELECT se_id, m FROM rep
+    ),
+    monthly AS (
+      SELECT
+        mo.se_id, mo.m,
+        COALESCE(ci.inflow_sales, 0)::numeric AS inflow_sales,
+        COALESCE(co.outflow_ops,  0)::numeric AS outflow_ops,
+        tu.turnover,
+        COALESCE(rp.rep_count, 0)::int AS rep_count
+      FROM months mo
+      LEFT JOIN cin  ci ON ci.se_id = mo.se_id AND ci.m = mo.m
+      LEFT JOIN cout co ON co.se_id = mo.se_id AND co.m = mo.m
+      LEFT JOIN turn tu ON tu.se_id = mo.se_id AND tu.m = mo.m
+      LEFT JOIN rep  rp ON rp.se_id = mo.se_id AND rp.m = mo.m
+    ),
+    per_se AS (
+      SELECT s.se_id,
+             SUM(mo.inflow_sales)  AS inflow_total,
+             SUM(mo.outflow_ops)   AS outflow_total,
+             AVG(mo.turnover)      AS avg_turnover,
+             AVG(mo.rep_count/3.0) AS reporting_rate
+      FROM scope_se s
+      LEFT JOIN monthly mo ON mo.se_id = s.se_id
+      GROUP BY s.se_id
+    ),
+    scored AS (
+      SELECT *,
+        CASE WHEN inflow_total <= 0 THEN 1
+             WHEN (inflow_total - outflow_total)/NULLIF(inflow_total,0) >= 0.15 THEN 5
+             WHEN (inflow_total - outflow_total)/NULLIF(inflow_total,0) >= 0.05 THEN 4
+             WHEN (inflow_total - outflow_total)/NULLIF(inflow_total,0) >= 0    THEN 3
+             WHEN (inflow_total - outflow_total)/NULLIF(inflow_total,0) >= -0.10 THEN 2
+             ELSE 1 END AS cash_margin_score,
+        CASE WHEN outflow_total <= 0 AND inflow_total > 0 THEN 5
+             WHEN outflow_total <= 0 THEN 1
+             WHEN inflow_total/NULLIF(outflow_total,0) >= 1.5 THEN 5
+             WHEN inflow_total/NULLIF(outflow_total,0) >= 1.2 THEN 4
+             WHEN inflow_total/NULLIF(outflow_total,0) >= 1.0 THEN 3
+             WHEN inflow_total/NULLIF(outflow_total,0) >= 0.8 THEN 2
+             ELSE 1 END AS inout_ratio_score,
+        CASE WHEN avg_turnover IS NULL THEN 1
+             WHEN avg_turnover >= 0.50 THEN 5
+             WHEN avg_turnover >= 0.35 THEN 4
+             WHEN avg_turnover >= 0.25 THEN 3
+             WHEN avg_turnover >= 0.15 THEN 2
+             ELSE 1 END AS turnover_score,
+        ROUND(1 + LEAST(GREATEST(reporting_rate,0),1)*4, 2) AS reporting_score
+      FROM per_se
+    ),
+    classified AS (
+      SELECT sc.*,
+             COALESCE(rps.months_any, 0)      AS months_any,
+             COALESCE(rps.months_complete, 0) AS months_complete,
+             ((CASE WHEN sc.cash_margin_score   <= 1.5 THEN 1 ELSE 0 END) +
+              (CASE WHEN sc.inout_ratio_score  <= 1.5 THEN 1 ELSE 0 END) +
+              (CASE WHEN sc.turnover_score     <= 1.5 THEN 1 ELSE 0 END) +
+              (CASE WHEN sc.reporting_score    <= 1.5 THEN 1 ELSE 0 END)) AS red_count
+      FROM scored sc
+      LEFT JOIN rep_per_se rps USING (se_id)
+    ),
+    agg AS (
+      SELECT
+        COUNT(*) AS se_count,
+        /* gate by months_complete >= 1 to avoid flagging no-data SEs */
+        SUM(CASE WHEN months_complete >= 1 AND red_count > 2 THEN 1 ELSE 0 END) AS flagged_count,
+        SUM(CASE WHEN months_complete >= 1
+                  AND cash_margin_score>3 AND inout_ratio_score>3
+                  AND turnover_score>3   AND reporting_score>3
+                 THEN 1 ELSE 0 END) AS healthy_se_count,
+
+        /* coverage counts */
+        SUM(CASE WHEN months_complete >= 1 THEN 1 ELSE 0 END) AS se_with_financials,
+
+        /* category totals (only count SEs with data) */
+        SUM(CASE WHEN months_complete >= 1 AND cash_margin_score<=1.5 THEN 1 ELSE 0 END)                      AS cash_red,
+        SUM(CASE WHEN months_complete >= 1 AND cash_margin_score>1.5 AND cash_margin_score<=3.0 THEN 1 ELSE 0 END) AS cash_moderate,
+        SUM(CASE WHEN months_complete >= 1 AND cash_margin_score>3.0 THEN 1 ELSE 0 END)                        AS cash_healthy,
+
+        SUM(CASE WHEN months_complete >= 1 AND inout_ratio_score<=1.5 THEN 1 ELSE 0 END)                       AS inout_red,
+        SUM(CASE WHEN months_complete >= 1 AND inout_ratio_score>1.5 AND inout_ratio_score<=3.0 THEN 1 ELSE 0 END) AS inout_moderate,
+        SUM(CASE WHEN months_complete >= 1 AND inout_ratio_score>3.0 THEN 1 ELSE 0 END)                        AS inout_healthy,
+
+        SUM(CASE WHEN months_complete >= 1 AND turnover_score<=1.5 THEN 1 ELSE 0 END)                          AS turn_red,
+        SUM(CASE WHEN months_complete >= 1 AND turnover_score>1.5 AND turnover_score<=3.0 THEN 1 ELSE 0 END)   AS turn_moderate,
+        SUM(CASE WHEN months_complete >= 1 AND turnover_score>3.0 THEN 1 ELSE 0 END)                           AS turn_healthy,
+
+        SUM(CASE WHEN months_complete >= 1 AND reporting_score<=1.5 THEN 1 ELSE 0 END)                         AS report_red,
+        SUM(CASE WHEN months_complete >= 1 AND reporting_score>1.5 AND reporting_score<=3.0 THEN 1 ELSE 0 END) AS report_moderate,
+        SUM(CASE WHEN months_complete >= 1 AND reporting_score>3.0 THEN 1 ELSE 0 END)                          AS report_healthy
+      FROM classified
+    )
+    SELECT *,
+           (se_count - se_with_financials) AS no_data_se_count
+    FROM agg;
+  `;
+
+  const params = [programId, period, start, end];
+  const { rows } = await pgDatabase.query(sql, params);
+  const r = rows?.[0] ?? {};
+
+  const seCount = Number(r.se_count || 0);
+  const eligible = Number(r.se_with_financials || 0);
+
+  const mk = (name, red, mod, healthy) => ({
+    category: name,
+    red: Number(red || 0),
+    moderate: Number(mod || 0),
+    healthy: Number(healthy || 0),
+    // pct base = eligible SEs only
+    redPct:      eligible ? +((red     || 0) * 100 / eligible).toFixed(1) : 0,
+    moderatePct: eligible ? +((mod     || 0) * 100 / eligible).toFixed(1) : 0,
+    healthyPct:  eligible ? +((healthy || 0) * 100 / eligible).toFixed(1) : 0,
+  });
+
+  return {
+    seCount,
+    seWithFinancials: eligible,
+    noDataSeCount: Number(r.no_data_se_count || 0),
+
+    flaggedCount: Number(r.flagged_count || 0),
+    healthySeCount: Number(r.healthy_se_count || 0),
+    moderateSeCount: Math.max(eligible - Number(r.flagged_count || 0) - Number(r.healthy_se_count || 0), 0),
+
+    categories: [
+      mk("Cash Margin",        r.cash_red,   r.cash_moderate,   r.cash_healthy),
+      mk("In/Out Ratio",       r.inout_red,  r.inout_moderate,  r.inout_healthy),
+      mk("Inventory Turnover", r.turn_red,   r.turn_moderate,   r.turn_healthy),
+      mk("Reporting",          r.report_red, r.report_moderate, r.report_healthy),
+    ],
+  };
 };
 
 exports.getImprovementScorePerMonthAnnually= async (program = null) => {

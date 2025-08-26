@@ -590,37 +590,40 @@ exports.getInventoryTurnoverOverall = async ({
   return rows ?? [];
 };
 
-/**
- * Portfolio KPIs across all SEs (optionally filter by program and period)
- * Params: from (YYYY-MM-DD, inclusive), to (YYYY-MM-DD, exclusive), program (text)
- */
-exports.getFinanceKPIs = async ({ from = null, to = null, program = null } = {}) => {
+exports.getFinanceKPIs = async ({ from = null, to = null, program = null, seId = null } = {}) => {
   const sql = `
     WITH params AS (
-      SELECT $1::date AS from_date, $2::date AS to_date, $3::text AS program_name
+      SELECT
+        $1::date AS from_date,
+        $2::date AS to_date,
+        $3::text AS program_name,
+        $4::uuid AS only_se          -- NEW
     ),
-    -- filter SEs early by program
+    -- Filter SEs by program (name) and/or specific seId
     se AS (
       SELECT se.se_id
       FROM socialenterprises se
       LEFT JOIN programs p ON p.program_id = se.program_id
       JOIN params pr ON TRUE
-      WHERE pr.program_name IS NULL OR p.name = pr.program_name
+      WHERE (pr.program_name IS NULL OR p.name = pr.program_name)
+        AND (pr.only_se     IS NULL OR se.se_id = pr.only_se)   -- NEW
     ),
-    -- monthly revenue & financing inflows (sales + other revenue; plus debt/capital)
+
+    -- monthly revenue & financing inflows
     cin AS (
       SELECT date_trunc('month', r.report_month)::date AS m,
              SUM(t.sales_amount + t.other_revenue_amount)::numeric AS revenue,
              SUM(t.liability_amount)::numeric                     AS debt_inflow,
              SUM(t.owners_capital_amount)::numeric                AS owner_capital_inflow
       FROM cash_in_report r
-      JOIN se      ON se.se_id = r.se_id
+      JOIN se ON se.se_id = r.se_id
       JOIN cash_in_transaction t USING (cash_in_report_id)
       JOIN params p ON TRUE
       WHERE (p.from_date IS NULL OR r.report_month >= p.from_date)
         AND (p.to_date   IS NULL OR r.report_month <  p.to_date)
       GROUP BY 1
     ),
+
     -- monthly operating outflows and purchases
     cout AS (
       SELECT date_trunc('month', r.report_month)::date AS m,
@@ -629,14 +632,15 @@ exports.getFinanceKPIs = async ({ from = null, to = null, program = null } = {})
              SUM(t.liability_amount)::numeric          AS debt_outflow,
              SUM(t.owners_withdrawal_amount)::numeric  AS owner_withdrawal
       FROM cash_out_report r
-      JOIN se      ON se.se_id = r.se_id
+      JOIN se ON se.se_id = r.se_id
       JOIN cash_out_transaction t USING (cash_out_report_id)
       JOIN params p ON TRUE
       WHERE (p.from_date IS NULL OR r.report_month >= p.from_date)
         AND (p.to_date   IS NULL OR r.report_month <  p.to_date)
       GROUP BY 1
     ),
-    -- monthly inventory valuation (with unit-price fallback to item.item_price)
+
+    -- monthly inventory valuation
     inv AS (
       SELECT i."month"::date AS m,
              SUM(COALESCE(i.begin_qty,0)
@@ -651,12 +655,14 @@ exports.getFinanceKPIs = async ({ from = null, to = null, program = null } = {})
         AND (p.to_date   IS NULL OR i."month" <  p.to_date)
       GROUP BY 1
     ),
-    -- month index (so months present in any source appear)
+
+    -- month index
     months AS (
       SELECT m FROM cin
       UNION SELECT m FROM cout
       UNION SELECT m FROM inv
     ),
+
     per_month AS (
       SELECT
         mo.m,
@@ -676,6 +682,7 @@ exports.getFinanceKPIs = async ({ from = null, to = null, program = null } = {})
       LEFT JOIN cout co ON co.m = mo.m
       LEFT JOIN inv  iv ON iv.m = mo.m
     ),
+
     calc AS (
       SELECT
         m,
@@ -691,23 +698,26 @@ exports.getFinanceKPIs = async ({ from = null, to = null, program = null } = {})
         days_in_month
       FROM per_month
     ),
-    -- reporting completeness across SEs and months (0..1)
+
+    -- reporting completeness: % of expected (3 reports per SE per month present in months)
     rep_counts AS (
       SELECT
-        (SELECT COUNT(*) FROM se)                                       AS se_count,
-        (SELECT COUNT(DISTINCT m) FROM months)                          AS months_with_any,
-        COUNT(g.*)                                                      AS submitted
+        (SELECT COUNT(*) FROM se)              AS se_count,
+        (SELECT COUNT(DISTINCT m) FROM months) AS months_with_any,
+        COUNT(g.*)                             AS submitted
       FROM se
       CROSS JOIN months mo
       LEFT JOIN monthly_report_guard g
-         ON g.se_id = se.se_id AND g."month" = mo.m
+        ON g.se_id = se.se_id AND g."month" = mo.m
     )
+
     SELECT
       -- totals
       ROUND(SUM(revenue), 2)                                           AS total_revenue,
       ROUND(SUM(purchases), 2)                                         AS total_purchases,
       ROUND(SUM(opex), 2)                                              AS total_opex,
       ROUND(SUM(cogs), 2)                                              AS total_cogs,
+
       -- profits & margins
       ROUND(SUM(revenue) - SUM(cogs), 2)                               AS total_gross_profit,
       CASE WHEN SUM(revenue) > 0
@@ -715,20 +725,25 @@ exports.getFinanceKPIs = async ({ from = null, to = null, program = null } = {})
       ROUND(SUM(revenue) - SUM(cogs) - SUM(opex), 2)                   AS total_operating_profit,
       CASE WHEN SUM(revenue) > 0
            THEN ROUND((SUM(revenue) - SUM(cogs) - SUM(opex)) / SUM(revenue), 4) END AS operating_margin_pct,
-      -- inventory efficiency (time-weighted)
+
+      -- inventory efficiency
       CASE
         WHEN SUM(avg_inventory * days_in_month) > 0
         THEN ROUND( SUM(cogs) / (SUM(avg_inventory * days_in_month)::numeric / SUM(days_in_month)), 4)
       END AS overall_turnover,
       CASE
         WHEN SUM(avg_inventory * days_in_month) > 0 AND SUM(cogs) > 0
-        THEN ROUND( SUM(days_in_month)::numeric /
-                    ( SUM(cogs) / (SUM(avg_inventory * days_in_month)::numeric / SUM(days_in_month)) ), 1)
+        THEN ROUND(
+          SUM(days_in_month)::numeric /
+          ( SUM(cogs) / (SUM(avg_inventory * days_in_month)::numeric / SUM(days_in_month)) )
+        , 1)
       END AS overall_dio_days,
+
       -- cash view
       ROUND( (SUM(revenue) + SUM(debt_inflow) + SUM(owner_capital_inflow))
             - (SUM(opex) + SUM(purchases) + SUM(debt_outflow) + SUM(owner_withdrawal)), 2) AS net_cash_flow,
-      -- reporting completeness
+
+      -- reporting completeness (0..1)
       CASE
         WHEN (SELECT se_count FROM rep_counts) * (SELECT months_with_any FROM rep_counts) * 3 > 0
         THEN ROUND(
@@ -739,7 +754,7 @@ exports.getFinanceKPIs = async ({ from = null, to = null, program = null } = {})
     FROM calc;
   `;
 
-  const { rows } = await pgDatabase.query(sql, [from, to, program]);
+  const { rows } = await pgDatabase.query(sql, [from, to, program, seId]);
   return rows?.[0] ?? {};
 };
 
