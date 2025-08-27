@@ -1396,7 +1396,16 @@ const Dashboard = ({ }) => {
                       rowsPerPageOptions={[5, 10]}
                     />
                   ) : (
-                    <Typography>No pending schedules available.</Typography>
+                    <Box
+                      display="flex"
+                      justifyContent="center"
+                      alignItems="center"
+                      height="400px"
+                    >
+                      <Typography color={colors.grey[300]}>
+                        No pending schedules available.
+                      </Typography>
+                    </Box>
                   )}
                 </Box>
               </Box>

@@ -13,20 +13,25 @@ import MenuOutlinedIcon from "@mui/icons-material/MenuOutlined";
 import SettingsAccessibilityOutlinedIcon from "@mui/icons-material/SettingsAccessibilityOutlined";
 import SupervisorAccountOutlinedIcon from "@mui/icons-material/SupervisorAccountOutlined";
 import {
+  Avatar,
   Box,
   Button,
+  Chip,
   Dialog,
   DialogActions,
   DialogTitle,
   IconButton,
+  Stack,
   Typography,
-  useTheme,
+  useTheme
 } from "@mui/material";
+import { alpha } from "@mui/material/styles";
 import { useGoogleLogin } from "@react-oauth/google";
 import { useEffect, useState } from "react";
 import { Menu, MenuItem, ProSidebar } from "react-pro-sidebar";
 import "react-pro-sidebar/dist/css/styles.css";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import axiosClient from "../../api/axiosClient";
 import { createCalendarEvents } from "../../components/googleCalendar";
 import { useAuth } from "../../context/authContext";
 import { tokens } from "../../theme";
@@ -51,7 +56,7 @@ const Item = ({ title, to, icon, selected, setSelected }) => {
 };
 
 // ⭐️
-const Sidebar = ({}) => {
+const Sidebar = ({ }) => {
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
   const [isCollapsed, setIsCollapsed] = useState(true);
@@ -72,6 +77,7 @@ const Sidebar = ({}) => {
   const isLSEEDUser = userRoles.some((role) => role.startsWith("LSEED"));
   const isLSEEDDirector = userRoles.includes("LSEED-Director");
   const shouldShowMinimalSidebar = isAdministrator && !isLSEEDDirector;
+  const [assignedPrograms, setAssignedPrograms] = useState([]);
 
   // ⭐️ Add this useEffect hook for debugging
   useEffect(() => {
@@ -87,6 +93,21 @@ const Sidebar = ({}) => {
       clearInterval(intervalId);
     };
   }, [isCoordinatorView]); // Add isCoordinatorView as a dependency
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        if (!isLSEEDCoordinator) { setAssignedPrograms([]); return; }
+        const { data } = await axiosClient.get("/api/users/me/program-assignments");
+        if (alive) setAssignedPrograms(Array.isArray(data) ? data : []);
+      } catch (e) {
+        console.error("load assigned programs:", e?.response?.data || e.message);
+        if (alive) setAssignedPrograms([]);
+      }
+    })();
+    return () => { alive = false; };
+  }, [isLSEEDCoordinator]);
 
   // Determine the default selected item based on the current route
   const getSelectedTitle = () => {
@@ -199,33 +220,69 @@ const Sidebar = ({}) => {
 
           {/* Profile Section */}
           {!isCollapsed && user && (
-            <Box textAlign="center" p="10px">
-              <Box display="flex" justifyContent="center" alignItems="center">
-                <img
-                  alt="profile-user"
-                  width="90px"
-                  height="90px"
-                  src="../../dist/assets/Picture.png"
-                  style={{
-                    borderRadius: "50%",
-                    border: `2px solid ${colors.grey[100]}`,
-                    boxShadow: "0px 4px 10px rgba(0,0,0,0.2)",
-                  }}
-                />
-              </Box>
+            <Box px={2.5} py={2} textAlign="center">
+              {/* Avatar */}
+              <Avatar
+                alt={`${user.firstName || "User"} ${user.lastName || ""}`.trim()}
+                src={user.photoUrl || "/assets/Picture.png"} // put Picture.png in /public/assets if using Vite/CRA
+                sx={{
+                  width: 92,
+                  height: 92,
+                  mx: "auto",
+                  border: `2px solid ${colors.grey[100]}`,
+                  boxShadow: "0 6px 18px rgba(0,0,0,.25)",
+                }}
+              />
+
+              {/* Name */}
               <Typography
-                variant="h5"
-                color={colors.grey[100]}
-                fontWeight="bold"
-                mt={1}
+                variant="h6"
+                sx={{
+                  mt: 1,
+                  fontWeight: 700,
+                  color: colors.grey[100],
+                  lineHeight: 1.2,
+                  maxWidth: 240,
+                  mx: "auto",
+                }}
               >
-                {user.firstName || "User"} {user.lastName || "User"}
+                {(user.firstName || "User") + " " + (user.lastName || "User")}
               </Typography>
-              <Typography variant="body2" color={colors.greenAccent[500]}>
-                {user.roles && user.roles.length > 0
-                  ? user.roles.join(" / ")
-                  : "No Role Assigned"}
+
+              {/* Role (its own row) */}
+              <Typography variant="body2" sx={{ mt: 0.5, color: colors.greenAccent[500] }}>
+                {userRoles?.length ? userRoles.join(" / ") : "No Role Assigned"}
               </Typography>
+
+              {/* Programs (separate row, wraps cleanly) */}
+              {isLSEEDCoordinator && assignedPrograms?.length > 0 && (
+                <Stack
+                  direction="row"
+                  spacing={0.75}
+                  justifyContent="center"
+                  alignItems="center"
+                  useFlexGap
+                  flexWrap="wrap"
+                  sx={{ mt: 1 }}
+                >
+                  {assignedPrograms.map((p) => (
+                    <Chip
+                      key={p.program_id}
+                      size="small"
+                      label={p.program_name} // make sure your query returns program_name
+                      variant="outlined"
+                      sx={{
+                        borderColor: alpha(colors.blueAccent[500], 0.6),
+                        color: colors.blueAccent[300],
+                        bgcolor: alpha(colors.blueAccent[500], 0.15),
+                        fontWeight: 700,
+                        height: 22,
+                        "& .MuiChip-label": { px: 1.25, py: 0.25 },
+                      }}
+                    />
+                  ))}
+                </Stack>
+              )}
             </Box>
           )}
 

@@ -2487,6 +2487,28 @@ app.post("/api/evaluate", async (req, res) => {
   }
 });
 
+app.get("/api/users/me/program-assignments", async (req, res) => {
+  try {
+    const userId = req.session?.user?.id;
+    if (!userId) return res.status(401).json({ message: "Not authenticated" });
+
+    const sql = `
+      SELECT
+        pa.program_id,
+        p.name AS program_name
+      FROM program_assignment pa
+      JOIN programs p ON p.program_id = pa.program_id
+      WHERE pa.user_id = $1
+      ORDER BY p.name ASC;
+    `;
+    const { rows } = await pgDatabase.query(sql, [userId]);
+    return res.status(200).json(rows); // [{ program_id, program_name }]
+  } catch (e) {
+    console.error("program-assignments:", e);
+    return res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
 app.post("/api/evaluate-mentor", async (req, res) => {
   try {
     let { programs } = req.body;

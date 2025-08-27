@@ -1,16 +1,13 @@
 // src/scenes/reports/index.jsx
 import {
+  Autocomplete,
   Box,
   Button,
-  FormControl,
-  InputLabel,
-  LinearProgress,
-  MenuItem,
-  Select,
   TextField,
   Typography,
-  useTheme,
+  useTheme
 } from "@mui/material";
+import { createFilterOptions } from "@mui/material/Autocomplete";
 import { useEffect, useState } from "react";
 import * as XLSX from "xlsx";
 import axiosClient from "../../api/axiosClient";
@@ -178,6 +175,11 @@ const Reports = () => {
     }
     return value;
   };
+
+  const seFilter = createFilterOptions({
+    // Search by team_name, abbr, and also show "team_name (abbr)"
+    stringify: (option) => `${option.team_name} ${option.abbr} ${option.team_name} (${option.abbr})`,
+  });
 
   // Pass optional reportTypeHint: "cash_in" | "cash_out" | "inventory_report" | "auto"
   const handleFileChange = (event, reportTypeHint = "") => {
@@ -1225,28 +1227,77 @@ const Reports = () => {
       {/* Dropdown on top */}
       <Box display="flex" flexDirection="column" alignItems="left" gap={4} mt={4}>
         <Box width="27%" bgcolor={colors.primary[400]} display="flex" padding={2} gap={2}>
-          <FormControl fullWidth sx={{ maxWidth: "500px", backgroundColor: colors.blueAccent[500] }}>
-            <InputLabel id="se-select-label" sx={{ color: "white" }}>
-              Select Social Enterprise
-            </InputLabel>
-            <Select
-              labelId="se-select-label"
-              value={selectedSE}
-              label="Select Social Enterprise"
-              onChange={handleSEChange}
-              sx={{
-                color: "white",
-                ".MuiOutlinedInput-notchedOutline": { border: 0 },
-                "& .MuiSvgIcon-root": { color: "white" },
-              }}
-            >
-              {socialEnterprises.map((se) => (
-                <MenuItem key={se.se_id} value={se.se_id} sx={{ color: "white" }}>
-                  {se.team_name} ({se.abbr})
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
+          <Autocomplete
+            options={socialEnterprises}
+            getOptionLabel={(o) => `${o.team_name} (${o.abbr})`}
+            filterOptions={seFilter}
+            value={socialEnterprises.find(se => se.se_id === selectedSE) || null}
+            onChange={(_, v) => handleSEChange({ target: { value: v?.se_id || "" } })}
+            isOptionEqualToValue={(o, v) => o.se_id === v.se_id}
+            clearOnEscape
+            openOnFocus
+            noOptionsText="No social enterprise found"
+            sx={{
+              width: "100%",
+              maxWidth: 500,
+              "& .MuiInputBase-root": {
+                color: colors.grey[100],
+                backgroundColor: colors.primary[400],
+              },
+              "& .MuiOutlinedInput-notchedOutline": { borderColor: "transparent" },
+              "&:hover .MuiOutlinedInput-notchedOutline": { borderColor: colors.blueAccent[500] },
+              "&.Mui-focused .MuiOutlinedInput-notchedOutline": { borderColor: colors.greenAccent[500] },
+              "& .MuiSvgIcon-root": { color: colors.grey[100] },
+            }}
+            componentsProps={{
+              paper: {
+                sx: {
+                  bgcolor: colors.primary[400],
+                  color: colors.grey[100],
+                  border: "1px solid",
+                  borderColor: colors.primary[300],
+                  boxShadow: 3,
+                },
+              },
+              popper: {
+                sx: { zIndex: (t) => t.zIndex.modal + 1 },
+              },
+              clearIndicator: { sx: { color: colors.grey[100] } },
+              popupIndicator: { sx: { color: colors.grey[100] } },
+            }}
+            ListboxProps={{
+              sx: {
+                maxHeight: 280,
+                "& .MuiAutocomplete-option": {
+                  py: 1, px: 2,
+                  color: colors.grey[100],
+                  "&[aria-selected='true']": {
+                    backgroundColor: colors.blueAccent[600],
+                  },
+                  "&.Mui-focused": {
+                    backgroundColor: colors.blueAccent[500],
+                  },
+                },
+              },
+            }}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Select Social Enterprise"
+                placeholder="Search by name or abbreviation…"
+                InputLabelProps={{ sx: { color: colors.grey[100] } }}
+                InputProps={{
+                  ...params.InputProps,
+                  sx: {
+                    "& .MuiInputBase-input::placeholder": {
+                      color: colors.grey[300],
+                      opacity: 1,
+                    },
+                  },
+                }}
+              />
+            )}
+          />
         </Box>
       </Box>
 
@@ -1259,51 +1310,6 @@ const Reports = () => {
           </Typography>
 
           <Box display="flex" gap={2} flexWrap="wrap">
-            {/* Cash In */}
-            <input
-              id="upload-cashin"
-              type="file"
-              accept=".xlsx,.csv"
-              hidden
-              onChange={(e) => {
-                handleFileChange(e, "cash_in");
-                e.target.value = "";
-              }}
-            />
-            <Button variant="contained" color="secondary" onClick={() => document.getElementById("upload-cashin")?.click()}>
-              Upload Cash In
-            </Button>
-
-            {/* Cash Out */}
-            <input
-              id="upload-cashout"
-              type="file"
-              accept=".xlsx,.csv"
-              hidden
-              onChange={(e) => {
-                handleFileChange(e, "cash_out");
-                e.target.value = "";
-              }}
-            />
-            <Button variant="contained" color="secondary" onClick={() => document.getElementById("upload-cashout")?.click()}>
-              Upload Cash Out
-            </Button>
-
-            {/* Inventory Report */}
-            <input
-              id="upload-inventory"
-              type="file"
-              accept=".xlsx,.csv"
-              hidden
-              onChange={(e) => {
-                handleFileChange(e, "inventory_report");
-                e.target.value = "";
-              }}
-            />
-            <Button variant="contained" color="secondary" onClick={() => document.getElementById("upload-inventory")?.click()}>
-              Upload Inventory Report
-            </Button>
-
             {/* Workbook (auto-extract tabs: cash_in / cash_out / inventory_report only) */}
             <input
               id="upload-workbook"
@@ -1315,7 +1321,7 @@ const Reports = () => {
                 e.target.value = "";
               }}
             />
-            <Button variant="outlined" color="inherit" onClick={() => document.getElementById("upload-workbook")?.click()}>
+            <Button variant="contained" color="secondary" onClick={() => document.getElementById("upload-workbook")?.click()}>
               Upload Workbook (auto-extract tabs)
             </Button>
           </Box>
@@ -1460,9 +1466,9 @@ const Reports = () => {
             </Box>
           </Box>
         )}
-
+        {/* TODO: Implement generation of financial statement reports. */}
         {/* --- Financial Statement Generation Section (UI ready) --- */}
-        <Box mt={2} width="100%" bgcolor={colors.primary[400]} p={2}>
+        {/* <Box mt={2} width="100%" bgcolor={colors.primary[400]} p={2}>
           <Typography variant="h4" color={colors.greenAccent[500]} mb={2}>
             Generate Financial Statement (Derived)
           </Typography>
@@ -1522,7 +1528,7 @@ const Reports = () => {
               {JSON.stringify(genResult, null, 2)}
             </Box>
           )}
-        </Box>
+        </Box> */}
       </Box>
     </Box>
   );
