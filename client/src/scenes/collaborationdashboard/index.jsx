@@ -27,6 +27,9 @@ const CollaborationDashboard = () => {
   const [expandedCardId, setExpandedCardId] = useState(null);
   const [requests, setRequests] = useState([]);
   const [selectedRequest, setSelectedRequest] = useState(null);
+  const [stats, setStats] = useState({ active_collabs: 0, unique_partners: 0 });
+  const [loadingStats, setLoadingStats] = useState(false);
+  const [errStats, setErrStats] = useState("");
 
   const navigate = useNavigate();
 
@@ -45,6 +48,29 @@ const CollaborationDashboard = () => {
     };
 
     fetchMentorships();
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        setLoadingStats(true);
+        setErrStats("");
+        const { data } = await axiosClient.get("/api/collab/stats/overview");
+        if (!alive) return;
+        setStats({
+          active_collabs: Number(data?.active_collabs) || 0,
+          unique_partners: Number(data?.unique_partners) || 0,
+        });
+      } catch (e) {
+        console.error("load collab stats:", e?.response?.data || e.message);
+        setErrStats("Failed to load collaboration stats.");
+        setStats({ active_collabs: 0, unique_partners: 0 });
+      } finally {
+        if (alive) setLoadingStats(false);
+      }
+    })();
+    return () => { alive = false; };
   }, []);
 
   const handleOpenMenu = (event, id) => {
@@ -85,21 +111,21 @@ const CollaborationDashboard = () => {
         console.error("Error fetching full request details:", err);
       }
     } else if (action === "Decline") {
-      // TODO handle decline of collaborations
       try {
-        let res = await axiosClient.post(
-          `/api/mentorship/insert-collaboration`, {
-          collaboration_request_details: request
-        }
-        );
+        const res = await axiosClient.post("/api/mentorship/decline-collaboration", {
+          collaboration_request_details: request,
+        });
         if (res.status === 200) {
-          setSnackbarMessage("Collaboration Accepted Successfully");
-          setSnackbarSeverity("success");
+          setSnackbarMessage("Collaboration declined.");
+          setSnackbarSeverity("info");
           setSnackbarOpen(true);
           setOpen(false);
         }
       } catch (err) {
-        console.error("Error fetching full request details:", err);
+        console.error("Decline collaboration failed:", err);
+        setSnackbarMessage("Failed to decline collaboration.");
+        setSnackbarSeverity("error");
+        setSnackbarOpen(true);
       }
     }
     handleCloseMenu();
@@ -272,91 +298,28 @@ const CollaborationDashboard = () => {
           subtitle="Welcome to Collaborations"
         />
       </Box>
-      {/* TODO: Fix the statboxes */}
       {/* Row 2 - Collaboration Insights StatBoxes */}
-      <Box
-        display="flex"
-        flexWrap="wrap"
-        gap="20px"
-        justifyContent="space-between"
-        mt="20px"
-      >
-        {/* No. of Collaborations */}
-        <Box
-          flex="1 1 22%"
-          backgroundColor={colors.primary[400]}
-          display="flex"
-          flexDirection="column"
-          alignItems="center"
-          justifyContent="center"
-          p="20px"
-        >
+      <Box display="flex" flexWrap="wrap" gap="20px" justifyContent="space-between" mt="20px">
+        {/* Active Collaborations */}
+        <Box flex="1 1 22%" backgroundColor={colors.primary[400]} display="flex" flexDirection="column" alignItems="center" justifyContent="center" p="20px">
           <HandshakeOutlinedIcon sx={{ fontSize: 40, color: colors.greenAccent[500], mb: 1 }} />
           <Typography variant="h4" fontWeight="bold" color={colors.grey[100]}>
-            69
+            {loadingStats ? "…" : stats.active_collabs}
           </Typography>
-          <Typography variant="subtitle2" color={colors.grey[300]}>
-            No. of Collaborations
-          </Typography>
+          <Typography variant="subtitle2" color={colors.grey[300]}>Active Collaborations</Typography>
         </Box>
 
-        {/* No. of Involved Social Enterprises */}
-        <Box
-          flex="1 1 22%"
-          backgroundColor={colors.primary[400]}
-          display="flex"
-          flexDirection="column"
-          alignItems="center"
-          justifyContent="center"
-          p="20px"
-        >
+        {/* Unique Partners */}
+        <Box flex="1 1 22%" backgroundColor={colors.primary[400]} display="flex" flexDirection="column" alignItems="center" justifyContent="center" p="20px">
           <GroupOutlinedIcon sx={{ fontSize: 40, color: colors.blueAccent[500], mb: 1 }} />
           <Typography variant="h4" fontWeight="bold" color={colors.grey[100]}>
-            60
+            {loadingStats ? "…" : stats.unique_partners}
           </Typography>
-          <Typography variant="subtitle2" color={colors.grey[300]}>
-            No. of Evaluations
-          </Typography>
+          <Typography variant="subtitle2" color={colors.grey[300]}>Unique Partners</Typography>
         </Box>
-
-        {/* Shared / Peer-Identified Strengths */}
-        {/* <Box
-          flex="1 1 22%"
-          backgroundColor={colors.primary[400]}
-          display="flex"
-          flexDirection="column"
-          alignItems="center"
-          justifyContent="center"
-          p="20px"
-        >
-          <ThumbUpAltOutlinedIcon sx={{ fontSize: 40, color: colors.blueAccent[300], mb: 1 }} />
-          <Typography variant="h4" fontWeight="bold" color={colors.grey[100]}>
-            {sharedStrengthsCount || peerStrengthsCount || 0}
-          </Typography>
-          <Typography variant="subtitle2" color={colors.grey[300]} align="center">
-            {strengthsLabel}
-          </Typography>
-        </Box> */}
-
-        {/* Shared / Peer-Identified Weaknesses */}
-        {/* <Box
-          flex="1 1 22%"
-          backgroundColor={colors.primary[400]}
-          display="flex"
-          flexDirection="column"
-          alignItems="center"
-          justifyContent="center"
-          p="20px"
-        >
-          <ThumbDownAltOutlinedIcon sx={{ fontSize: 40, color: colors.redAccent[300], mb: 1 }} />
-          <Typography variant="h4" fontWeight="bold" color={colors.grey[100]}>
-            {sharedWeaknessesCount || peerWeaknessesCount || 0}
-          </Typography>
-          <Typography variant="subtitle2" color={colors.grey[300]} align="center">
-            {weaknessesLabel}
-          </Typography>
-        </Box> */}
       </Box>
+
+      {errStats && <Alert severity="error" sx={{ mt: 1 }}>{errStats}</Alert>}
 
       <Button
         variant="contained"
@@ -366,6 +329,7 @@ const CollaborationDashboard = () => {
           "&:hover": {
             backgroundColor: colors.greenAccent[600],
           },
+          mt: "20px"
         }}
         onClick={() => setCollaborateDialog(true)}
       >

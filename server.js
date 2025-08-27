@@ -118,7 +118,7 @@ const { getApplicationList } = require("./controllers/menteesFormSubmissionsCont
 const { getMentorFormApplications } = require("./controllers/mentorFormApplicationController.js");
 const { getSignUpPassword } = require("./controllers/signuppasswordsController.js");
 const { getAuditLogs } = require("./controllers/auditlogsController.js");
-const { insertCollaboration, requestCollaborationInsert, getExistingCollaborations, getCollaborationRequests, getCollaborationRequestDetails } = require("./controllers/mentorshipcollaborationController.js");
+const { insertCollaboration, requestCollaborationInsert, getExistingCollaborations, getCollaborationRequests, getCollaborationRequestDetails, lockRequestForUpdate, markRequestDeclined } = require("./controllers/mentorshipcollaborationController.js");
 const { stripDangerousChars } = require("./utils/sanitize.js");
 const { isEmail, isName, passwordMeetsPolicy } = require("./utils/validators.js");
 const {
@@ -128,6 +128,7 @@ const {
   filterAllowed,
 } = require("./utils/allowLists");
 const { getTopStarTrend, getOverallCashFlow, getTopSellingItemsOverall, getInventoryTurnoverOverall, getFinanceRiskHeatmap, getFinanceKPIs, getMonthlyCapitalFlows, getMonthlyNetCash, getRevenueSeasonality } = require("./controllers/financialAnalyticsController.js");
+const { createNotification } = require("./controllers/notificationController.js");
 
 const app = express();
 
@@ -2595,89 +2596,226 @@ app.get('/api/check-mentor-application-status', async (req, res) => {
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
-
+// TODO: Make these basis for tx aware queries that follows ACID properties.
 app.post("/api/mentorship/insert-collaboration", async (req, res) => {
+  const client = await pgDatabase.connect();
   try {
-    const { collaboration_request_details } = req.body;
+    const d = req.body?.collaboration_request_details;
+    if (!d?.collaboration_card_id || !d?.mentorship_collaboration_request_id) {
+      return res.status(400).json({ message: "Missing request details." });
+    }
+    // uuid sanity check (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+    if (!/^[0-9a-fA-F-]{36}$/.test(d.mentorship_collaboration_request_id)) {
+      return res.status(400).json({ message: "Invalid mentorship_collaboration_request_id." });
+    }
 
-    // Extract SE IDs from collaboration_card_id
-    const cardId = collaboration_request_details.collaboration_card_id;
+    // Spec: "<suggested_se_id>_<seeking_se_id>"
+    const m = String(d.collaboration_card_id).match(
+      /^([0-9a-fA-F-]{36})_([0-9a-fA-F-]{36})$/
+    );
+    if (!m) {
+      return res.status(400).json({ message: "Invalid collaboration_card_id format." });
+    }
+    const suggested_se_id = m[1];
+    const seeking_se_id   = m[2];
 
-    const match = cardId.match(
-      /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/
+    await client.query("BEGIN");
+    await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+
+    // 1) Lock the request row
+    const { rows: reqRows } = await client.query(
+      `SELECT *
+         FROM mentorship_collaboration_requests
+        WHERE mentorship_collaboration_request_id = $1
+        FOR UPDATE`,
+      [d.mentorship_collaboration_request_id]
+    );
+    if (!reqRows.length) throw Object.assign(new Error("REQUEST_NOT_FOUND"), { status: 404 });
+    const reqRow = reqRows[0];
+
+    // Cross-check: still pending, same card id
+    if (reqRow.status !== "Pending") {
+      throw Object.assign(new Error(`REQUEST_ALREADY_${reqRow.status.toUpperCase()}`), { status: 409 });
+    }
+    if (reqRow.collaboration_card_id !== d.collaboration_card_id) {
+      throw Object.assign(new Error("CARD_ID_MISMATCH"), { status: 400 });
+    }
+
+    // 2) Resolve mentorships inside TX
+    const seeking   = await getMentorBySEID(client, seeking_se_id);
+    const suggested = await getMentorBySEID(client, suggested_se_id);
+
+    // Optional auth: only the SUGGESTED mentor can accept
+    // if (req.user?.mentor_id && req.user.mentor_id !== reqRow.suggested_collaboration_mentor_id) {
+    //   throw Object.assign(new Error("FORBIDDEN"), { status: 403 });
+    // }
+
+    // Cross-check: request's suggested mentor equals our resolved suggested mentor
+    if (reqRow.suggested_collaboration_mentor_id !== suggested.mentor_id) {
+      throw Object.assign(new Error("SUGGESTED_MENTOR_MISMATCH"), { status: 400 });
+    }
+
+    // 3) Insert collaboration using the request's tier (not body)
+    const collab = await insertCollaboration(
+      client,
+      {
+        ...d,
+        tier: reqRow.tier, // enforce server truth
+      },
+      seeking.mentorship_id,
+      suggested.mentorship_id
     );
 
-    const seeking_collaboration_se_id = match[1];
-    const suggested_collaboration_se_id = match[2];
+    // 4) Guarded status flip (still Pending)
+    const upd = await client.query(
+      `UPDATE mentorship_collaboration_requests
+          SET status = 'Accepted'
+        WHERE mentorship_collaboration_request_id = $1
+          AND status = 'Pending'`,
+      [d.mentorship_collaboration_request_id]
+    );
+    if (!upd.rowCount) {
+      throw Object.assign(new Error("REQUEST_STATE_CHANGED"), { status: 409 });
+    }
 
-    // Insert the collaboration request
-    const mentorDetails = await getMentorBySEID(seeking_collaboration_se_id);
+    // 5) Notification (same TX)
+    const title   = `Collaboration Accepted for ${d.seeking_collaboration_se_name}`;
+    const message = `${d.suggested_collaboration_mentor_name} has accepted collaborating with your mentorship SE, ${d.seeking_collaboration_mentor_name}.`;
 
-    const suggested_mentorship = await getMentorBySEID(suggested_collaboration_se_id)
-
-    // Insert the collaboration request
-    await insertCollaboration(collaboration_request_details, mentorDetails.mentorship_id, suggested_mentorship.mentorship_id);
-
-    // 🔔 Send notification to the suggested mentor
-    const seekingMentorName = collaboration_request_details.seeking_collaboration_mentor_name;
-    const suggestedMentorName = collaboration_request_details.suggested_collaboration_mentor_name;
-    const seName = collaboration_request_details.seeking_collaboration_se_name;
-
-    const notificationTitle = `Collaboration Accepted for ${seName}`;
-    const notificationMessage = `${suggestedMentorName} has accepted collaborating with your mentorship SE, ${seekingMentorName}.`;
-    //TODO: Fixx query for notification following ACID 
-    await pgDatabase.query(
-      `INSERT INTO notification (notification_id, receiver_id, title, message, created_at, target_route)
-       VALUES (uuid_generate_v4(), $1, $2, $3, NOW(), '/collaboration-dashboard');`,
-      [mentorDetails.mentor_id, notificationTitle, notificationMessage]
+    await createNotification(
+      seeking.mentor_id,
+      title,
+      message,
+      "/collaboration-dashboard",
+      client
     );
 
-    res.status(200).json({ message: "Collaboration request submitted and notification sent." });
+    await client.query("COMMIT");
+    return res.status(200).json({
+      message: "Collaboration created, request accepted, and notification sent.",
+      collaboration_id: collab.collaboration_id,
+    });
   } catch (error) {
-    console.error("Error inserting collaboration:", error);
-    res.status(500).json({ message: "Internal Server Error" });
+    try { await client.query("ROLLBACK"); } catch {}
+    console.error("insert-collaboration:", error);
+    return res.status(error.status || 500).json({ message: error.message || "Internal Server Error" });
+  } finally {
+    client.release();
+  }
+});
+// TODO: Make these basis for tx aware queries that follows ACID properties.
+app.post("/api/mentorship/decline-collaboration", async (req, res) => {
+  const client = await pgDatabase.connect();
+  try {
+    const d = req.body?.collaboration_request_details;
+    if (!d) return res.status(400).json({ message: "Missing collaboration_request_details." });
+
+    const requestId = d.mentorship_collaboration_request_id || null;
+    const cardId    = d.collaboration_card_id || null;
+
+    if (!requestId && !cardId) {
+      return res.status(400).json({ message: "Provide mentorship_collaboration_request_id or collaboration_card_id." });
+    }
+
+    await client.query("BEGIN");
+    await client.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+    // Optional fast-fail under heavy contention:
+    // await client.query("SET LOCAL lock_timeout = '3s'; SET LOCAL statement_timeout = '10s';");
+
+    // 1) Lock the request row (serializes competing Accept/Decline)
+    const reqRow = await lockRequestForUpdate(client, { requestId, cardId });
+    if (!reqRow) {
+      throw Object.assign(new Error("REQUEST_NOT_FOUND"), { status: 404 });
+    }
+    if (reqRow.status !== "Pending") {
+      throw Object.assign(new Error(`REQUEST_ALREADY_${reqRow.status.toUpperCase()}`), { status: 409 });
+    }
+
+    // 2) Parse card id to find the *seeking* mentor (receiver of notification)
+    // Format: "<suggested_se_id>_<seeking_se_id>"
+    const parts = String(reqRow.collaboration_card_id || cardId).split("_");
+    if (parts.length !== 2) {
+      throw Object.assign(new Error("INVALID_CARD_ID_FORMAT"), { status: 400 });
+    }
+    const suggested_se_id = parts[0];
+    const seeking_se_id   = parts[1];
+
+    const seeking = await getMentorBySEID(client, seeking_se_id); // { mentor_id, mentorship_id, name }
+    const seekingMentorId = seeking.mentor_id;
+
+    // 3) Mark as Declined (trigger-friendly)
+    // If you installed the BEFORE UPDATE trigger that deletes on 'Declined',
+    // this call will still succeed (we don't rely on RETURNING rows).
+    const declined = await markRequestDeclined(client, reqRow.mentorship_collaboration_request_id);
+    if (!declined) {
+      // Another transaction changed it or trigger already removed it unexpectedly
+      throw Object.assign(new Error("REQUEST_STATE_CHANGED"), { status: 409 });
+    }
+
+    // 4) Notification (same TX)
+    const title = `Collaboration Declined for ${reqRow.seeking_collaboration_se_name}`;
+    const message = `${reqRow.suggested_collaboration_mentor_name} declined your request to collaborate with ${reqRow.suggested_collaboration_se_name}.`;
+
+    await createNotification(
+      seekingMentorId,
+      title,
+      message,
+      "/collaboration-dashboard",
+      client
+    );
+
+    await client.query("COMMIT");
+    return res.status(200).json({ message: "Collaboration request declined." });
+  } catch (error) {
+    try { await client.query("ROLLBACK"); } catch {}
+    console.error("decline-collaboration:", error);
+    return res.status(error.status || 500).json({ message: error.message || "Internal Server Error" });
+  } finally {
+    client.release();
   }
 });
 
-app.post("/api/mentorship/decline-collaboration", async (req, res) => {
+app.get("/api/collab/stats/overview", async (req, res) => {
   try {
-    const { collaboration_request_details } = req.body;
+    const mentorId = req.session.user?.id;
 
-    // Extract SE IDs from collaboration_card_id
-    const cardId = collaboration_request_details.collaboration_card_id;
+    const sql = `
+      WITH my_ms AS (
+        SELECT mentorship_id
+        FROM mentorships
+        WHERE mentor_id = $1 AND status = 'Active'
+      ),
+      active_collabs AS (
+        SELECT c.*
+        FROM mentorship_collaborations c
+        WHERE c.status = TRUE
+          AND (
+            c.seeking_collaboration_mentorship_id  IN (SELECT mentorship_id FROM my_ms)
+            OR
+            c.suggested_collaborator_mentorship_id IN (SELECT mentorship_id FROM my_ms)
+          )
+      ),
+      partners AS (
+        SELECT CASE
+                 WHEN c.seeking_collaboration_mentorship_id  IN (SELECT mentorship_id FROM my_ms)
+                   THEN c.suggested_collaborator_mentorship_id
+                 ELSE c.seeking_collaboration_mentorship_id
+               END AS partner_mentorship_id
+        FROM active_collabs c
+      )
+      SELECT
+        (SELECT COUNT(*) FROM active_collabs)                                 AS active_collabs,
+        (SELECT COUNT(DISTINCT partner_mentorship_id) FROM partners)          AS unique_partners;
+    `;
 
-    const match = cardId.match(
-      /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})_([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/
-    );
-
-    const seeking_collaboration_se_id = match[1];
-    const suggested_collaboration_se_id = match[2];
-
-    // Insert the collaboration request
-    const mentorDetails = await getMentorBySEID(seeking_collaboration_se_id);
-
-    const suggested_mentorship = await getMentorBySEID(suggested_collaboration_se_id)
-
-    // Insert the collaboration request
-    await insertCollaboration(collaboration_request_details, mentorDetails.mentorship_id, suggested_mentorship.mentorship_id);
-
-    // 🔔 Send notification to the suggested mentor
-    const seekingMentorName = collaboration_request_details.seeking_collaboration_mentor_name;
-    const suggestedMentorName = collaboration_request_details.suggested_collaboration_mentor_name;
-    const seName = collaboration_request_details.seeking_collaboration_se_name;
-
-    const notificationTitle = `Collaboration Accepted for ${seName}`;
-    const notificationMessage = `${suggestedMentorName} has accepted collaborating with your mentorship SE, ${seekingMentorName}.`;
-    //TODO: Fixx query for notification following ACID 
-    await pgDatabase.query(
-      `INSERT INTO notification (notification_id, receiver_id, title, message, created_at, target_route)
-       VALUES (uuid_generate_v4(), $1, $2, $3, NOW(), '/collaboration-dashboard');`,
-      [mentorDetails.mentor_id, notificationTitle, notificationMessage]
-    );
-
-    res.status(200).json({ message: "Collaboration request submitted and notification sent." });
-  } catch (error) {
-    console.error("Error inserting collaboration:", error);
+    const { rows } = await pgDatabase.query(sql, [mentorId]);
+    const row = rows[0] || { active_collabs: 0, unique_partners: 0 };
+    res.json({
+      active_collabs: Number(row.active_collabs) || 0,
+      unique_partners: Number(row.unique_partners) || 0,
+    });
+  } catch (e) {
+    console.error("collab overview stats:", e);
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
@@ -4412,7 +4550,7 @@ app.post("/api/adhoc-report", async (req, res) => {
   }
 });
 
-// Updated Financial Report Route
+// TODO: UPDATE Financial Report Route
 app.post("/api/financial-report", async (req, res) => {
   try {
     const {
@@ -7405,109 +7543,39 @@ async function updateUser(id, updatedUser) {
 // Endpoint to fetch notifications
 app.get("/api/notifications", async (req, res) => {
   try {
-    const { receiver_id } = req.query;
-
-    if (!receiver_id) {
-      return res.status(400).json({ message: "Receiver ID is required" });
+    const receiverId = req.session?.user?.id; // <-- authoritative source
+    if (!receiverId) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    if (!/^[0-9a-fA-F-]{36}$/.test(receiverId)) {
+      return res.status(400).json({ message: "Invalid session user id" });
     }
 
-    // ✅ Fetch the user's roles (as an array) to determine which notifications to show
-    const userRolesQuery = `
+    // Optional pagination & filters
+    const limit  = Math.min(parseInt(req.query.limit || "50", 10) || 50, 100);
+    const offset = Math.max(parseInt(req.query.offset || "0", 10) || 0, 0);
+    const onlyUnread = String(req.query.only_unread || "").toLowerCase() === "true";
+
+    const sql = `
       SELECT
-          ARRAY_AGG(uhr.role_name) AS roles
-      FROM
-          users u
-      LEFT JOIN
-          user_has_roles uhr ON u.user_id = uhr.user_id
-      WHERE
-          u.user_id = $1
-      GROUP BY
-          u.user_id; -- Group by user_id to get all roles for one user
+        notification_id,
+        title,
+        message,
+        target_route,
+        is_read,
+        created_at
+      FROM public.notification
+      WHERE receiver_id = $1
+        ${onlyUnread ? "AND is_read = FALSE" : ""}
+      ORDER BY created_at DESC
+      LIMIT $2 OFFSET $3;
     `;
-    const userResult = await pgDatabase.query(userRolesQuery, [receiver_id]);
 
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    // Extract roles array, handling [null] if no roles are assigned
-    const userRoles = userResult.rows[0].roles && userResult.rows[0].roles[0] !== null
-
-
-      ? userResult.rows[0].roles
-      : [];
-
-    // Determine the user's effective role for notification purposes
-    const isLSEEDUser = userRoles.some(role =>
-      role === "LSEED-Coordinator" ||
-      role === "LSEED-Director" ||
-      role === "Administrator"
-    );
-    const isMentorUser = userRoles.includes("Mentor");
-
-    let query;
-    let queryParams = [receiver_id]; // Base parameters for the query
-
-    // ✅ Modify the query based on user role(s)
-    if (isLSEEDUser) {
-      // LSEED users (including Administrators) get scheduling notifications
-      query = `
-          SELECT n.notification_id, n.title, n.created_at,
-                COALESCE(u.first_name || ' ' || u.last_name, 'System') AS sender_name,
-                n.se_id, se.team_name AS se_name, ms.status, n.target_route, n.message, n.is_read
-          FROM notification n
-          LEFT JOIN users u ON n.sender_id = u.user_id
-          LEFT JOIN socialenterprises se ON n.se_id = se.se_id
-          LEFT JOIN mentoring_session ms ON n.mentoring_session_id = ms.mentoring_session_id
-          WHERE n.receiver_id = $1
-          ORDER BY n.created_at DESC;
-
-      `;
-    } else if (isMentorUser) { // If not LSEED, check if they are a Mentor
-      // Mentors only get status change notifications
-      query = `
-          SELECT n.notification_id, n.title, n.created_at,
-                  n.se_id, se.team_name AS se_name, ms.status, n.target_route, n.message, n.is_read
-          FROM notification n
-          LEFT JOIN socialenterprises se ON n.se_id = se.se_id
-          LEFT JOIN mentoring_session ms ON n.mentoring_session_id = ms.mentoring_session_id
-          WHERE n.receiver_id = $1
-          ORDER BY n.created_at DESC;
-      `;
-    } else {
-      // Handle cases for other roles or users with no relevant roles
-      // Perhaps return an empty array or a message indicating no specific notifications
-      return res.status(200).json([]);
-    }
-
-    const result = await pgDatabase.query(query, queryParams); // Use queryParams for the SQL values
-
-    if (result.rows.length === 0) {
-      return res.status(200).json([]); // Return empty array if no notifications
-    }
-
-    res.json(result.rows);
+    const { rows } = await pgDatabase.query(sql, [receiverId, limit, offset]);
+    return res.status(200).json(rows);
   } catch (error) {
     console.error("❌ Error fetching notifications:", error);
-    res.status(500).json({ message: "Internal Server Error" });
-  }
-});
-
-// For Analytics Page
-
-app.get("/api/financial-statements", async (req, res) => {
-  try {
-    const result = await pgDatabase.query(`
-      SELECT fs.report_id, fs.date, fs.total_revenue, fs.total_expenses, fs.net_income,
-             fs.total_assets, fs.total_liabilities, fs.owner_equity, fs.se_id,
-             se.abbr AS se_abbr
-      FROM financial_statements fs
-      JOIN socialenterprises se ON fs.se_id = se.se_id
-    `);
-    res.json(result.rows);
-  } catch (error) {
-    console.error("Error fetching financial statements:", error);
-    res.status(500).json({ message: "Internal Server Error" });
+    return res.status(500).json({ message: "Internal Server Error" });
   }
 });
 

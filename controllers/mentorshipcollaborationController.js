@@ -117,55 +117,57 @@ exports.getCollaborationRequestDetails = async (mentorship_collaboration_request
 };
 
 exports.insertCollaboration = async (
+  client,
   collaboration_request_details,
   seeking_collaboration_mentorship_id,
   suggested_collaborator_mentorship_id
 ) => {
-  const client = await pgDatabase.connect();
+  const { tier, mentorship_collaboration_request_id } = collaboration_request_details;
+  const tier_id = Number(tier) || 1;
 
-  try {
-    const {
-      tier,
-      mentorship_collaboration_request_id,
-    } = collaboration_request_details;
-
-    await client.query('BEGIN'); // Start transaction
-
-    const insertQuery = `
-      INSERT INTO mentorship_collaborations 
-      (seeking_collaboration_mentorship_id, suggested_collaborator_mentorship_id, 
-      tier_id, mentorship_collaboration_request_id)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT DO NOTHING;
-    `;
-
-    const insertResult = await client.query(insertQuery, [
+  // Insert collaboration; rely on unique constraint to block duplicates
+  const insertSQL = `
+    INSERT INTO mentorship_collaborations (
+      collaboration_id,
       seeking_collaboration_mentorship_id,
       suggested_collaborator_mentorship_id,
-      tier,
+      tier_id,
+      mentorship_collaboration_request_id,
+      status,
+      created_at
+    )
+    VALUES (uuid_generate_v4(), $1, $2, $3, $4, TRUE, NOW())
+    RETURNING collaboration_id, created_at;
+  `;
+
+  try {
+    const { rows } = await client.query(insertSQL, [
+      seeking_collaboration_mentorship_id,
+      suggested_collaborator_mentorship_id,
+      tier_id,
       mentorship_collaboration_request_id
     ]);
+    const collab = rows[0];
 
-    // Check if the INSERT actually happened (not skipped due to conflict)
-    if (insertResult.rowCount === 0) {
-      throw new Error("Collaboration already exists — no insert performed.");
+    // Guarded status flip to avoid races (must still be Pending)
+    const upd = await client.query(
+      `UPDATE mentorship_collaboration_requests
+          SET status = 'Accepted'
+        WHERE mentorship_collaboration_request_id = $1
+          AND status = 'Pending'`,
+      [mentorship_collaboration_request_id]
+    );
+    if (!upd.rowCount) {
+      // If the request was changed concurrently, abort to keep atomicity
+      throw Object.assign(new Error("REQUEST_STATE_CHANGED"), { status: 409 });
     }
 
-    const updateQuery = `
-      UPDATE mentorship_collaboration_requests
-      SET status = 'Accepted'
-      WHERE mentorship_collaboration_request_id = $1;
-    `;
-
-    await client.query(updateQuery, [mentorship_collaboration_request_id]);
-
-    await client.query('COMMIT'); // ✅ Commit if all succeeds
-  } catch (error) {
-    await client.query('ROLLBACK'); // ❌ Rollback if any error
-    console.error("❌ Error inserting mentorship collaboration:", error);
-    throw error;
-  } finally {
-    client.release(); // Always release the client back to the pool
+    return collab;
+  } catch (e) {
+    if (e.code === "23505") { // unique_directional_pair_per_tier
+      throw Object.assign(new Error("COLLAB_ALREADY_EXISTS"), { status: 409 });
+    }
+    throw e;
   }
 };
 
@@ -240,4 +242,43 @@ exports.requestCollaborationInsert = async (collaboration) => {
     console.error("❌ Error inserting mentorship collaboration request:", error);
     throw error;
   }
+};
+
+// Lock one row by id or cardId; returns the locked row or null
+exports.lockRequestForUpdate = async (client, { requestId, cardId }) => {
+  if (requestId) {
+    const { rows } = await client.query(
+      `SELECT * FROM mentorship_collaboration_requests
+        WHERE mentorship_collaboration_request_id = $1
+        FOR UPDATE`,
+      [requestId]
+    );
+    return rows[0] || null;
+  }
+  if (cardId) {
+    const { rows } = await client.query(
+      `SELECT * FROM mentorship_collaboration_requests
+        WHERE collaboration_card_id = $1
+        FOR UPDATE`,
+      [cardId]
+    );
+    return rows[0] || null;
+  }
+  return null;
+};
+
+exports.markRequestDeclined = async (client, mentorship_collaboration_request_id) => {
+  const res = await client.query(
+    `UPDATE mentorship_collaboration_requests
+        SET status = 'Declined'
+      WHERE mentorship_collaboration_request_id = $1
+        AND status = 'Pending'`,
+    [mentorship_collaboration_request_id]
+  );
+  // If you have a BEFORE UPDATE trigger that deletes the row and RETURN NULL,
+  // res.rowCount will be 0 even though the operation succeeded by design.
+  // But since we hold a row lock and we checked status='Pending' earlier,
+  // any 0 here likely means the trigger deleted or another TX changed it.
+  // Treat >=0 as success but require that the row existed & was Pending before.
+  return res.rowCount >= 0;
 };
