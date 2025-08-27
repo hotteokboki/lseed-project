@@ -84,44 +84,29 @@ const CollaborationDashboard = () => {
       } catch (err) {
         console.error("Error fetching full request details:", err);
       }
+    } else if (action === "Decline") {
+      // TODO handle decline of collaborations
+      try {
+        let res = await axiosClient.post(
+          `/api/mentorship/insert-collaboration`, {
+          collaboration_request_details: request
+        }
+        );
+        if (res.status === 200) {
+          setSnackbarMessage("Collaboration Accepted Successfully");
+          setSnackbarSeverity("success");
+          setSnackbarOpen(true);
+          setOpen(false);
+        }
+      } catch (err) {
+        console.error("Error fetching full request details:", err);
+      }
     }
     handleCloseMenu();
   };
 
   const handleClose = () => {
     setOpen(false);
-  };
-  // TODO handle cases below
-  const handleDecline = async (request) => {
-    try {
-      // Send decline request to backend here if needed
-      console.log("Declined:", request);
-      setOpen(false);
-      setSnackbarMessage("Collaboration request declined.");
-      setSnackbarSeverity("info");
-      setSnackbarOpen(true);
-    } catch (err) {
-      console.error("Error declining request:", err);
-      setSnackbarMessage("Failed to decline request.");
-      setSnackbarSeverity("error");
-      setSnackbarOpen(true);
-    }
-  };
-
-  const handleAccept = async (request) => {
-    try {
-      // Send accept request to backend here if needed
-      console.log("Accepted:", request);
-      setOpen(false);
-      setSnackbarMessage("Collaboration request accepted.");
-      setSnackbarSeverity("success");
-      setSnackbarOpen(true);
-    } catch (err) {
-      console.error("Error accepting request:", err);
-      setSnackbarMessage("Failed to accept request.");
-      setSnackbarSeverity("error");
-      setSnackbarOpen(true);
-    }
   };
 
   useEffect(() => {
