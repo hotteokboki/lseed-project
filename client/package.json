@@ -85,5 +85,6 @@
     "@vitejs/plugin-react-swc": "^4.0.0",
     "npm-check-updates": "^18.0.2",
     "vite": "^7.1.2"
-  }
+  },
+  "type": "module"
 }
