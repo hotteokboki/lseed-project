@@ -1,7 +1,6 @@
 require('dotenv').config();
 const { Pool } = require('pg');
 
-//PUSH TESTING
 
 // // Retrieve Database credentials from environment variables (Production [DLSU])
 // const pool = new Pool({
